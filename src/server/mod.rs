@@ -14,33 +14,47 @@ use crate::store::SharedStore;
 use tokio_util::sync::CancellationToken;
 
 pub async fn run_grpc_server(
-    addr: std::net::SocketAddr,
+    listener: tokio::net::TcpListener,
     store: SharedStore,
     shutdown: CancellationToken,
 ) -> anyhow::Result<()> {
     let otlp_service = Arc::new(otlp_grpc::OtlpGrpcService::new(store.clone()));
     let query_service = query_grpc::QueryGrpcService::new(store);
 
+    let incoming = tonic::transport::server::TcpIncoming::from(listener);
     tonic::transport::Server::builder()
         .add_service(TraceServiceServer::from_arc(otlp_service.clone()))
         .add_service(LogsServiceServer::from_arc(otlp_service.clone()))
         .add_service(MetricsServiceServer::from_arc(otlp_service))
         .add_service(QueryServiceServer::new(query_service))
-        .serve_with_shutdown(addr, shutdown.cancelled())
+        .serve_with_incoming_shutdown(incoming, shutdown.cancelled())
         .await?;
 
     Ok(())
 }
 
 pub async fn run_http_server(
-    addr: std::net::SocketAddr,
+    listener: tokio::net::TcpListener,
     store: SharedStore,
     shutdown: CancellationToken,
 ) -> anyhow::Result<()> {
     let app = otlp_http::router(store);
-    let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(listener, app)
         .with_graceful_shutdown(async move { shutdown.cancelled().await })
         .await?;
     Ok(())
+}
+
+/// Bind TCP listeners for both ports upfront, returning an error if either port is in use.
+pub async fn bind_listeners(
+    grpc_addr: std::net::SocketAddr,
+    http_addr: std::net::SocketAddr,
+) -> anyhow::Result<(tokio::net::TcpListener, tokio::net::TcpListener)> {
+    let grpc_listener = tokio::net::TcpListener::bind(grpc_addr)
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to bind gRPC address {}: {}", grpc_addr, e))?;
+    let http_listener = tokio::net::TcpListener::bind(http_addr)
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to bind HTTP address {}: {}", http_addr, e))?;
+    Ok((grpc_listener, http_listener))
 }

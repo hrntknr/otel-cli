@@ -40,11 +40,12 @@ fn make_resource(service_name: &str) -> Option<Resource> {
 async fn start_grpc_server(port: u16) -> (store::SharedStore, CancellationToken) {
     let (shared_store, _rx) = store::new_shared(1000);
     let addr: std::net::SocketAddr = format!("127.0.0.1:{}", port).parse().unwrap();
+    let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
     let store_clone = shared_store.clone();
     let shutdown = CancellationToken::new();
     let shutdown_clone = shutdown.clone();
     tokio::spawn(async move {
-        otel_cli::server::run_grpc_server(addr, store_clone, shutdown_clone)
+        otel_cli::server::run_grpc_server(listener, store_clone, shutdown_clone)
             .await
             .unwrap();
     });

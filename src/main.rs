@@ -20,13 +20,16 @@ async fn main() -> anyhow::Result<()> {
             let grpc_addr: std::net::SocketAddr = grpc_addr.parse()?;
             let http_addr: std::net::SocketAddr = http_addr.parse()?;
 
+            let (grpc_listener, http_listener) =
+                server::bind_listeners(grpc_addr, http_addr).await?;
+
             let grpc_handle = tokio::spawn(server::run_grpc_server(
-                grpc_addr,
+                grpc_listener,
                 store.clone(),
                 shutdown.clone(),
             ));
             let http_handle = tokio::spawn(server::run_http_server(
-                http_addr,
+                http_listener,
                 store.clone(),
                 shutdown.clone(),
             ));
