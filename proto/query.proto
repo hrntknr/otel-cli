@@ -11,6 +11,9 @@ service QueryService {
   rpc QueryTraces(QueryTracesRequest) returns (QueryTracesResponse);
   rpc QueryLogs(QueryLogsRequest) returns (QueryLogsResponse);
   rpc QueryMetrics(QueryMetricsRequest) returns (QueryMetricsResponse);
+  rpc ClearTraces(ClearTracesRequest) returns (ClearResponse);
+  rpc ClearLogs(ClearLogsRequest) returns (ClearResponse);
+  rpc ClearMetrics(ClearMetricsRequest) returns (ClearResponse);
 }
 
 message QueryTracesRequest {
@@ -44,3 +47,8 @@ message QueryMetricsRequest {
 message QueryMetricsResponse {
   repeated opentelemetry.proto.metrics.v1.ResourceMetrics resource_metrics = 1;
 }
+
+message ClearTracesRequest {}
+message ClearLogsRequest {}
+message ClearMetricsRequest {}
+message ClearResponse {}

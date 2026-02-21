@@ -66,6 +66,21 @@ pub enum Commands {
         #[arg(long, default_value = "text")]
         format: OutputFormat,
     },
+    /// Clear stored data on server
+    Clear {
+        /// Server address
+        #[arg(long, default_value = "http://localhost:4317")]
+        server: String,
+        /// Clear traces
+        #[arg(long)]
+        traces: bool,
+        /// Clear logs
+        #[arg(long)]
+        logs: bool,
+        /// Clear metrics
+        #[arg(long)]
+        metrics: bool,
+    },
     /// Query metrics from server
     Metrics {
         /// Server address

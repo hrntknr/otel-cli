@@ -14,6 +14,9 @@ pub enum StoreEvent {
     TracesAdded,
     LogsAdded,
     MetricsAdded,
+    TracesCleared,
+    LogsCleared,
+    MetricsCleared,
 }
 
 pub struct Store {
@@ -189,6 +192,21 @@ impl Store {
             }
         }
         let _ = self.event_tx.send(StoreEvent::MetricsAdded);
+    }
+
+    pub fn clear_traces(&mut self) {
+        self.traces.clear();
+        let _ = self.event_tx.send(StoreEvent::TracesCleared);
+    }
+
+    pub fn clear_logs(&mut self) {
+        self.logs.clear();
+        let _ = self.event_tx.send(StoreEvent::LogsCleared);
+    }
+
+    pub fn clear_metrics(&mut self) {
+        self.metrics.clear();
+        let _ = self.event_tx.send(StoreEvent::MetricsCleared);
     }
 
     pub fn trace_count(&self) -> usize {

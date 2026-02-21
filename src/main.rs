@@ -75,6 +75,15 @@ async fn main() -> anyhow::Result<()> {
                 .await?;
             Ok(())
         }
+        Commands::Clear {
+            server,
+            traces,
+            logs,
+            metrics,
+        } => {
+            client::clear::clear(&server, traces, logs, metrics).await?;
+            Ok(())
+        }
         Commands::Metrics {
             server,
             service,

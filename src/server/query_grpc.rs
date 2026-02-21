@@ -1,8 +1,9 @@
 use tonic::{Request, Response, Status};
 
 use crate::proto::otelcli::query::v1::{
-    query_service_server::QueryService as QueryServiceTrait, QueryLogsRequest, QueryLogsResponse,
-    QueryMetricsRequest, QueryMetricsResponse, QueryTracesRequest, QueryTracesResponse,
+    query_service_server::QueryService as QueryServiceTrait, ClearLogsRequest, ClearMetricsRequest,
+    ClearResponse, ClearTracesRequest, QueryLogsRequest, QueryLogsResponse, QueryMetricsRequest,
+    QueryMetricsResponse, QueryTracesRequest, QueryTracesResponse,
 };
 use crate::store::{LogFilter, MetricFilter, SharedStore, TraceFilter};
 
@@ -77,5 +78,29 @@ impl QueryServiceTrait for QueryGrpcService {
         let store = self.store.read().await;
         let resource_metrics = store.query_metrics(&filter, limit);
         Ok(Response::new(QueryMetricsResponse { resource_metrics }))
+    }
+
+    async fn clear_traces(
+        &self,
+        _request: Request<ClearTracesRequest>,
+    ) -> Result<Response<ClearResponse>, Status> {
+        self.store.write().await.clear_traces();
+        Ok(Response::new(ClearResponse {}))
+    }
+
+    async fn clear_logs(
+        &self,
+        _request: Request<ClearLogsRequest>,
+    ) -> Result<Response<ClearResponse>, Status> {
+        self.store.write().await.clear_logs();
+        Ok(Response::new(ClearResponse {}))
+    }
+
+    async fn clear_metrics(
+        &self,
+        _request: Request<ClearMetricsRequest>,
+    ) -> Result<Response<ClearResponse>, Status> {
+        self.store.write().await.clear_metrics();
+        Ok(Response::new(ClearResponse {}))
     }
 }
