@@ -7,6 +7,7 @@ use crate::store::StoreEvent;
 pub enum AppEvent {
     Key(KeyEvent),
     Mouse(MouseEvent),
+    Resize,
     StoreUpdate,
     Tick,
 }
@@ -14,6 +15,7 @@ pub enum AppEvent {
 enum TermEvent {
     Key(KeyEvent),
     Mouse(MouseEvent),
+    Resize,
 }
 
 pub struct EventHandler {
@@ -34,6 +36,11 @@ impl EventHandler {
                     }
                     Ok(Event::Mouse(mouse)) => {
                         if term_tx.send(TermEvent::Mouse(mouse)).is_err() {
+                            break;
+                        }
+                    }
+                    Ok(Event::Resize(_, _)) => {
+                        if term_tx.send(TermEvent::Resize).is_err() {
                             break;
                         }
                     }
@@ -58,6 +65,7 @@ impl EventHandler {
                     match result {
                         Some(TermEvent::Key(key)) => return AppEvent::Key(key),
                         Some(TermEvent::Mouse(mouse)) => return AppEvent::Mouse(mouse),
+                        Some(TermEvent::Resize) => return AppEvent::Resize,
                         None => return AppEvent::Tick,
                     }
                 }

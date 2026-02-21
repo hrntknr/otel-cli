@@ -20,8 +20,17 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     draw_tabs(frame, chunks[0], app);
 
     app.content_area = chunks[1];
-    // borders(2) + header(1) + header margin(1) = 4
-    app.page_size = chunks[1].height.saturating_sub(4) as usize;
+    let old_page_size = app.page_size;
+    // borders(2) + header(1) = 3
+    app.page_size = chunks[1].height.saturating_sub(3) as usize;
+
+    // Keep bottom-anchored when window grows
+    if app.page_size > old_page_size {
+        let growth = app.page_size - old_page_size;
+        let state = app.active_table_state();
+        let off = state.offset();
+        *state.offset_mut() = off.saturating_sub(growth);
+    }
 
     match app.current_tab {
         Tab::Traces => match app.trace_view {
@@ -79,8 +88,7 @@ fn severity_color(severity: &str) -> Color {
 
 fn draw_traces_list(frame: &mut Frame, area: Rect, app: &mut App) {
     let header = Row::new(vec!["Trace ID", "Service", "Root Span", "Spans", "Duration"])
-        .style(Style::default().bold())
-        .bottom_margin(1);
+        .style(Style::default().bold());
 
     let rows: Vec<Row> = app
         .trace_summaries
@@ -154,8 +162,7 @@ fn draw_traces_timeline(frame: &mut Frame, area: Rect, app: &mut App) {
     let waterfall_width = area.width.saturating_sub(2 + 40 + 15 + 12 + 6) as usize;
 
     let header = Row::new(vec!["Span", "Service", "Duration", "Waterfall"])
-        .style(Style::default().bold())
-        .bottom_margin(1);
+        .style(Style::default().bold());
 
     let rows: Vec<Row> = app
         .timeline_spans
@@ -238,8 +245,7 @@ fn log_row_cells(l: &LogRow) -> Vec<Cell<'static>> {
 
 fn draw_logs_table_basic(frame: &mut Frame, area: Rect, app: &mut App) {
     let header = Row::new(vec!["Timestamp", "Severity", "Body"])
-        .style(Style::default().bold())
-        .bottom_margin(1);
+        .style(Style::default().bold());
 
     let rows: Vec<Row> = app
         .logs_data
@@ -248,7 +254,7 @@ fn draw_logs_table_basic(frame: &mut Frame, area: Rect, app: &mut App) {
         .collect();
 
     let widths = [
-        Constraint::Length(30),
+        Constraint::Length(12),
         Constraint::Length(10),
         Constraint::Min(0),
     ];
@@ -270,7 +276,7 @@ fn draw_logs_table_basic(frame: &mut Frame, area: Rect, app: &mut App) {
 }
 
 fn draw_logs_split(frame: &mut Frame, area: Rect, app: &mut App) {
-    if app.table_state.selected().is_some() {
+    if app.log_detail_open && app.table_state.selected().is_some() {
         let left = 100 - app.detail_panel_percent;
         let chunks = Layout::default()
             .direction(Direction::Horizontal)
@@ -377,8 +383,7 @@ fn build_detail_lines(log: &LogRow) -> Vec<Line<'static>> {
 
 fn draw_metrics_table(frame: &mut Frame, area: Rect, app: &mut App) {
     let header = Row::new(vec!["Name", "Type", "Service"])
-        .style(Style::default().bold())
-        .bottom_margin(1);
+        .style(Style::default().bold());
 
     let rows: Vec<Row> = app
         .metrics_data
@@ -408,28 +413,64 @@ fn draw_metrics_table(frame: &mut Frame, area: Rect, app: &mut App) {
 }
 
 fn draw_status_bar(frame: &mut Frame, area: Rect, app: &App) {
+    if let Some(ref input) = app.search_input {
+        let line = Line::from(vec![
+            Span::styled("/", Style::default().fg(Color::Yellow).bg(Color::White)),
+            Span::styled(
+                format!("{}|", input),
+                Style::default().fg(Color::Black).bg(Color::White),
+            ),
+        ]);
+        let paragraph = Paragraph::new(line).style(Style::default().bg(Color::White));
+        frame.render_widget(paragraph, area);
+        return;
+    }
+
     let status = match app.current_tab {
         Tab::Logs => {
             let follow_str = if app.follow { "ON" } else { "OFF" };
-            let n = app.log_filter_condition_count();
-            let filter_str = if n > 0 {
-                format!("/:Filter({})", n)
+            let search_str = if app.log_search.is_empty() {
+                "/:Search".to_string()
             } else {
-                "/:Filter".to_string()
+                format!("/:Search(\"{}\")", app.log_search)
+            };
+            let filter_n = app.log_filter.severity.as_ref().map_or(0, |_| 1)
+                + app.log_filter.attribute_conditions.len()
+                + app.log_filter.resource_conditions.len();
+            let filter_str = if filter_n > 0 {
+                format!("F4:Filter({})", filter_n)
+            } else {
+                "F4:Filter".to_string()
+            };
+            let detail_str = if app.log_detail_open {
+                "Esc:Close"
+            } else {
+                "Enter:Open"
             };
             format!(
-                "{} | [f]ollow:{} | c:Clear | q:Quit",
-                filter_str, follow_str
+                "{} | {} | {} | [f]ollow:{} | c:Clear | q:Quit",
+                search_str, filter_str, detail_str, follow_str
             )
         }
         Tab::Traces => {
             let follow_str = if app.follow { "ON" } else { "OFF" };
+            let search_str = if app.trace_search.is_empty() {
+                "/:Search".to_string()
+            } else {
+                format!("/:Search(\"{}\")", app.trace_search)
+            };
             match app.trace_view {
                 TraceView::List => {
-                    format!("Enter:Open | [f]ollow:{} | c:Clear | q:Quit", follow_str)
+                    format!(
+                        "{} | Enter:Open | [f]ollow:{} | c:Clear | q:Quit",
+                        search_str, follow_str
+                    )
                 }
                 TraceView::Timeline(_) => {
-                    format!("Esc:Back | [f]ollow:{} | c:Clear | q:Quit", follow_str)
+                    format!(
+                        "{} | Esc:Back | [f]ollow:{} | c:Clear | q:Quit",
+                        search_str, follow_str
+                    )
                 }
             }
         }
@@ -496,10 +537,12 @@ fn draw_filter_list(
     let mut lines: Vec<Line> = Vec::new();
 
     // Severity
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(" Severity", section_style)));
     let sev_text = if let Some(ref sev) = popup.severity {
-        format!(" Severity: >= {}", sev.value)
+        format!("   >= {}", sev.value)
     } else {
-        " Severity: (not set)".to_string()
+        "   (not set)".to_string()
     };
     let sev_style = if selected == 0 { highlight } else { normal };
     lines.push(Line::from(Span::styled(sev_text, sev_style)));

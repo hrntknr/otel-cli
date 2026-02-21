@@ -164,10 +164,6 @@ pub const ALL_OPERATORS: &[FilterOperator] = &[
     FilterOperator::Contains,
     FilterOperator::NotEq,
     FilterOperator::NotContains,
-    FilterOperator::Ge,
-    FilterOperator::Gt,
-    FilterOperator::Le,
-    FilterOperator::Lt,
 ];
 
 pub fn operator_symbol(op: &FilterOperator) -> &'static str {
@@ -214,6 +210,7 @@ pub struct App {
     pub metric_count: usize,
     pub follow: bool,
     pub page_size: usize,
+    pub log_detail_open: bool,
     should_quit: bool,
     pending_clear: bool,
     pub trace_view: TraceView,
@@ -229,6 +226,9 @@ pub struct App {
     pub available_log_fields: Vec<String>,
     pub available_resource_fields: Vec<String>,
     pending_refresh: bool,
+    pub search_input: Option<String>,
+    pub log_search: String,
+    pub trace_search: String,
 }
 
 impl App {
@@ -245,6 +245,7 @@ impl App {
             metric_count: 0,
             follow: true,
             page_size: 20,
+            log_detail_open: true,
             should_quit: false,
             pending_clear: false,
             trace_view: TraceView::default(),
@@ -256,10 +257,19 @@ impl App {
             content_area: ratatui::layout::Rect::default(),
             dragging_split: false,
             log_filter_popup: None,
-            log_filter: LogFilter::default(),
+            log_filter: LogFilter {
+                severity: Some(SeverityCondition {
+                    operator: FilterOperator::Ge,
+                    value: "INFO".to_string(),
+                }),
+                ..LogFilter::default()
+            },
             available_log_fields: Vec::new(),
             available_resource_fields: Vec::new(),
             pending_refresh: false,
+            search_input: None,
+            log_search: String::new(),
+            trace_search: String::new(),
         }
     }
 
@@ -275,6 +285,7 @@ impl App {
             match self.event_handler.next().await {
                 event::AppEvent::Key(key) => self.handle_key(key),
                 event::AppEvent::Mouse(mouse) => self.handle_mouse(mouse),
+                event::AppEvent::Resize => {}
                 event::AppEvent::StoreUpdate => self.refresh_data().await,
                 event::AppEvent::Tick => {}
             }
@@ -297,6 +308,30 @@ impl App {
 
     fn handle_key(&mut self, key: crossterm::event::KeyEvent) {
         if key.kind != crossterm::event::KeyEventKind::Press {
+            return;
+        }
+
+        // Route to search input if active
+        if let Some(ref mut input) = self.search_input {
+            match key.code {
+                KeyCode::Char(c) => input.push(c),
+                KeyCode::Backspace => {
+                    input.pop();
+                }
+                KeyCode::Enter => {
+                    let text = self.search_input.take().unwrap();
+                    match self.current_tab {
+                        tabs::Tab::Logs => self.log_search = text,
+                        tabs::Tab::Traces => self.trace_search = text,
+                        _ => {}
+                    }
+                    self.pending_refresh = true;
+                }
+                KeyCode::Esc => {
+                    self.search_input = None;
+                }
+                _ => {}
+            }
             return;
         }
 
@@ -339,7 +374,9 @@ impl App {
                 }
             }
             KeyCode::Enter => {
-                if self.current_tab == tabs::Tab::Traces {
+                if self.current_tab == tabs::Tab::Logs {
+                    self.log_detail_open = true;
+                } else if self.current_tab == tabs::Tab::Traces {
                     if let TraceView::List = self.trace_view {
                         if let Some(idx) = self.table_state.selected() {
                             if let Some(summary) = self.trace_summaries.get(idx) {
@@ -357,6 +394,11 @@ impl App {
                 }
             }
             KeyCode::Char('/') => {
+                if matches!(self.current_tab, tabs::Tab::Logs | tabs::Tab::Traces) {
+                    self.search_input = Some(String::new());
+                }
+            }
+            KeyCode::F(4) => {
                 if self.current_tab == tabs::Tab::Logs {
                     self.open_filter_popup();
                 }
@@ -371,7 +413,9 @@ impl App {
                         return;
                     }
                 }
-                self.table_state.select(None);
+                if self.current_tab == tabs::Tab::Logs {
+                    self.log_detail_open = false;
+                }
             }
             _ => {}
         }
@@ -399,6 +443,9 @@ impl App {
 
     pub fn log_filter_condition_count(&self) -> usize {
         let mut count = 0;
+        if !self.log_search.is_empty() {
+            count += 1;
+        }
         if self.log_filter.severity.is_some() {
             count += 1;
         }
@@ -419,10 +466,15 @@ impl App {
                             *selected -= 1;
                         }
                     }
-                    KeyCode::Down | KeyCode::Char('j') => {
+                    KeyCode::Down | KeyCode::Char('j') | KeyCode::Tab => {
                         let max = filter_list_item_count(na, nr).saturating_sub(1);
                         if *selected < max {
                             *selected += 1;
+                        }
+                    }
+                    KeyCode::BackTab => {
+                        if *selected > 0 {
+                            *selected -= 1;
                         }
                     }
                     KeyCode::Enter => {
@@ -886,6 +938,18 @@ impl App {
 
         self.raw_traces = traces;
         self.trace_summaries = build_trace_summaries(&self.raw_traces);
+
+        if !self.trace_search.is_empty() {
+            let needle = self.trace_search.to_ascii_lowercase();
+            self.trace_summaries.retain(|t| {
+                let line = format!(
+                    "{} {} {} {}",
+                    t.trace_id, t.root_service, t.root_span_name, t.duration
+                );
+                line.to_ascii_lowercase().contains(&needle)
+            });
+        }
+
         self.trace_count = self.trace_summaries.len();
         if let TraceView::Timeline(ref trace_id) = self.trace_view {
             self.timeline_spans = build_timeline_spans(&self.raw_traces, trace_id);
@@ -903,10 +967,20 @@ impl App {
         // Collect available field names from all logs
         self.update_available_fields(&all_logs);
 
-        self.logs_data = filtered_logs
+        let mut logs_data: Vec<LogRow> = filtered_logs
             .into_iter()
             .flat_map(|rl| convert_log_rows(&rl))
             .collect();
+
+        if !self.log_search.is_empty() {
+            let needle = self.log_search.to_ascii_lowercase();
+            logs_data.retain(|row| {
+                let line = format!("{} {} {}", row.timestamp, row.severity, row.body);
+                line.to_ascii_lowercase().contains(&needle)
+            });
+        }
+
+        self.logs_data = logs_data;
 
         if self.current_tab == tabs::Tab::Logs && self.follow && !self.logs_data.is_empty() {
             self.table_state
@@ -940,6 +1014,21 @@ impl App {
 
         self.available_log_fields = log_fields.into_iter().collect();
         self.available_resource_fields = resource_fields.into_iter().collect();
+    }
+}
+
+fn format_timestamp_time_only(nanos: u64) -> String {
+    if nanos == 0 {
+        return "N/A".to_string();
+    }
+    let secs = (nanos / 1_000_000_000) as i64;
+    let nsec = (nanos % 1_000_000_000) as u32;
+    match chrono::DateTime::from_timestamp(secs, nsec) {
+        Some(dt) => {
+            let local = dt.with_timezone(&chrono::Local);
+            local.format("%H:%M:%S%.3f").to_string()
+        }
+        None => "N/A".to_string(),
     }
 }
 
@@ -1126,7 +1215,7 @@ fn convert_log_rows(rl: &ResourceLogs) -> Vec<LogRow> {
                         .map(client::extract_any_value_string)
                         .unwrap_or_default();
                     LogRow {
-                        timestamp: client::format_timestamp(lr.time_unix_nano),
+                        timestamp: format_timestamp_time_only(lr.time_unix_nano),
                         severity: lr.severity_text.clone(),
                         service_name: service_name.clone(),
                         body,
