@@ -20,7 +20,7 @@ use std::collections::HashMap;
 use crate::client;
 use crate::proto::opentelemetry::proto::{
     logs::v1::ResourceLogs,
-    metrics::v1::{metric, ResourceMetrics},
+    metrics::v1::{metric, number_data_point, ResourceMetrics},
     trace::v1::ResourceSpans,
 };
 use crate::store::{
@@ -192,10 +192,19 @@ pub fn operator_label(op: &FilterOperator) -> &'static str {
     }
 }
 
-pub struct MetricRow {
+pub struct MetricDataPoint {
+    pub timestamp: String,
+    pub value: String,
+    pub attributes: Vec<(String, String)>,
+}
+
+pub struct MetricGroup {
     pub name: String,
     pub metric_type: String,
-    pub service_name: String,
+    pub description: String,
+    pub unit: String,
+    pub service_names: Vec<String>,
+    pub data_points: Vec<MetricDataPoint>,
 }
 
 pub struct App {
@@ -204,7 +213,7 @@ pub struct App {
     pub current_tab: tabs::Tab,
     pub table_state: TableState,
     pub logs_data: Vec<LogRow>,
-    pub metrics_data: Vec<MetricRow>,
+    pub metrics_data: Vec<MetricGroup>,
     pub trace_count: usize,
     pub log_count: usize,
     pub metric_count: usize,
@@ -987,10 +996,7 @@ impl App {
                 .select(Some(self.logs_data.len() - 1));
         }
 
-        self.metrics_data = metrics
-            .into_iter()
-            .flat_map(|rm| convert_metric_rows(&rm))
-            .collect();
+        self.metrics_data = build_metric_groups(&metrics);
     }
 
     fn update_available_fields(&mut self, logs: &[ResourceLogs]) {
@@ -1231,31 +1237,120 @@ fn convert_log_rows(rl: &ResourceLogs) -> Vec<LogRow> {
         .collect()
 }
 
-fn convert_metric_rows(rm: &ResourceMetrics) -> Vec<MetricRow> {
-    let service_name = client::get_service_name(&rm.resource);
-    rm.scope_metrics
-        .iter()
-        .flat_map(|sm| {
-            sm.metrics
-                .iter()
-                .map(|m| {
-                    let metric_type = match &m.data {
-                        Some(metric::Data::Gauge(_)) => "gauge",
-                        Some(metric::Data::Sum(_)) => "sum",
-                        Some(metric::Data::Histogram(_)) => "histogram",
-                        Some(metric::Data::ExponentialHistogram(_)) => "exp_histogram",
-                        Some(metric::Data::Summary(_)) => "summary",
-                        None => "unknown",
-                    };
-                    MetricRow {
-                        name: m.name.clone(),
-                        metric_type: metric_type.to_string(),
-                        service_name: service_name.clone(),
-                    }
-                })
-                .collect::<Vec<_>>()
-        })
-        .collect()
+fn format_number_value(value: &Option<number_data_point::Value>) -> String {
+    match value {
+        Some(number_data_point::Value::AsDouble(d)) => format!("{}", d),
+        Some(number_data_point::Value::AsInt(i)) => format!("{}", i),
+        None => "N/A".to_string(),
+    }
+}
+
+fn metric_type_name(data: &Option<metric::Data>) -> &'static str {
+    match data {
+        Some(metric::Data::Gauge(_)) => "gauge",
+        Some(metric::Data::Sum(_)) => "sum",
+        Some(metric::Data::Histogram(_)) => "histogram",
+        Some(metric::Data::ExponentialHistogram(_)) => "exp_histogram",
+        Some(metric::Data::Summary(_)) => "summary",
+        None => "unknown",
+    }
+}
+
+fn extract_metric_data_points(data: &Option<metric::Data>) -> Vec<MetricDataPoint> {
+    match data {
+        Some(metric::Data::Gauge(g)) => g
+            .data_points
+            .iter()
+            .map(|dp| MetricDataPoint {
+                timestamp: format_timestamp_time_only(dp.time_unix_nano),
+                value: format_number_value(&dp.value),
+                attributes: extract_kv_pairs(&dp.attributes),
+            })
+            .collect(),
+        Some(metric::Data::Sum(s)) => s
+            .data_points
+            .iter()
+            .map(|dp| MetricDataPoint {
+                timestamp: format_timestamp_time_only(dp.time_unix_nano),
+                value: format_number_value(&dp.value),
+                attributes: extract_kv_pairs(&dp.attributes),
+            })
+            .collect(),
+        Some(metric::Data::Histogram(h)) => h
+            .data_points
+            .iter()
+            .map(|dp| {
+                let sum_str = dp.sum.map(|v| format!("{}", v)).unwrap_or("N/A".into());
+                MetricDataPoint {
+                    timestamp: format_timestamp_time_only(dp.time_unix_nano),
+                    value: format!("count={} sum={}", dp.count, sum_str),
+                    attributes: extract_kv_pairs(&dp.attributes),
+                }
+            })
+            .collect(),
+        Some(metric::Data::ExponentialHistogram(eh)) => eh
+            .data_points
+            .iter()
+            .map(|dp| {
+                let sum_str = dp.sum.map(|v| format!("{}", v)).unwrap_or("N/A".into());
+                MetricDataPoint {
+                    timestamp: format_timestamp_time_only(dp.time_unix_nano),
+                    value: format!("count={} sum={}", dp.count, sum_str),
+                    attributes: extract_kv_pairs(&dp.attributes),
+                }
+            })
+            .collect(),
+        Some(metric::Data::Summary(s)) => s
+            .data_points
+            .iter()
+            .map(|dp| {
+                let quantiles: Vec<String> = dp
+                    .quantile_values
+                    .iter()
+                    .map(|q| format!("p{}={}", (q.quantile * 100.0) as u32, q.value))
+                    .collect();
+                let q_str = if quantiles.is_empty() {
+                    String::new()
+                } else {
+                    format!(" {}", quantiles.join(" "))
+                };
+                MetricDataPoint {
+                    timestamp: format_timestamp_time_only(dp.time_unix_nano),
+                    value: format!("count={} sum={}{}", dp.count, dp.sum, q_str),
+                    attributes: extract_kv_pairs(&dp.attributes),
+                }
+            })
+            .collect(),
+        None => Vec::new(),
+    }
+}
+
+fn build_metric_groups(resource_metrics: &[ResourceMetrics]) -> Vec<MetricGroup> {
+    let mut groups: HashMap<String, MetricGroup> = HashMap::new();
+
+    for rm in resource_metrics {
+        let service_name = client::get_service_name(&rm.resource);
+        for sm in &rm.scope_metrics {
+            for m in &sm.metrics {
+                let group = groups.entry(m.name.clone()).or_insert_with(|| MetricGroup {
+                    name: m.name.clone(),
+                    metric_type: metric_type_name(&m.data).to_string(),
+                    description: m.description.clone(),
+                    unit: m.unit.clone(),
+                    service_names: Vec::new(),
+                    data_points: Vec::new(),
+                });
+                if !group.service_names.contains(&service_name) {
+                    group.service_names.push(service_name.clone());
+                }
+                group.data_points.extend(extract_metric_data_points(&m.data));
+            }
+        }
+    }
+
+    let mut result: Vec<MetricGroup> = groups.into_values().collect();
+    result.sort_by(|a, b| a.name.cmp(&b.name));
+    result
 }
 
 pub async fn run(

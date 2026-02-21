@@ -3,8 +3,8 @@ use ratatui::widgets::*;
 
 use super::tabs::Tab;
 use super::{
-    operator_label, operator_symbol, App, FilterPopupMode, LogRow, TraceView, ALL_OPERATORS,
-    SEVERITY_LEVELS,
+    operator_label, operator_symbol, App, FilterPopupMode, LogRow, MetricGroup, TraceView,
+    ALL_OPERATORS, SEVERITY_LEVELS,
 };
 
 pub fn draw(frame: &mut Frame, app: &mut App) {
@@ -38,7 +38,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
             TraceView::Timeline(_) => draw_traces_timeline(frame, chunks[1], app),
         },
         Tab::Logs => draw_logs_split(frame, chunks[1], app),
-        Tab::Metrics => draw_metrics_table(frame, chunks[1], app),
+        Tab::Metrics => draw_metrics_split(frame, chunks[1], app),
     }
 
     draw_status_bar(frame, chunks[2], app);
@@ -382,7 +382,7 @@ fn build_detail_lines(log: &LogRow) -> Vec<Line<'static>> {
 }
 
 fn draw_metrics_table(frame: &mut Frame, area: Rect, app: &mut App) {
-    let header = Row::new(vec!["Name", "Type", "Service"])
+    let header = Row::new(vec!["Name", "Type", "Points", "Service"])
         .style(Style::default().bold());
 
     let rows: Vec<Row> = app
@@ -392,15 +392,17 @@ fn draw_metrics_table(frame: &mut Frame, area: Rect, app: &mut App) {
             Row::new(vec![
                 m.name.clone(),
                 m.metric_type.clone(),
-                m.service_name.clone(),
+                m.data_points.len().to_string(),
+                m.service_names.join(", "),
             ])
         })
         .collect();
 
     let widths = [
-        Constraint::Percentage(40),
-        Constraint::Length(15),
-        Constraint::Percentage(30),
+        Constraint::Min(0),
+        Constraint::Length(14),
+        Constraint::Length(6),
+        Constraint::Length(20),
     ];
 
     let table = Table::new(rows, widths)
@@ -410,6 +412,106 @@ fn draw_metrics_table(frame: &mut Frame, area: Rect, app: &mut App) {
         .highlight_symbol("▶ ");
 
     frame.render_stateful_widget(table, area, &mut app.table_state);
+}
+
+fn draw_metrics_split(frame: &mut Frame, area: Rect, app: &mut App) {
+    if app.table_state.selected().is_some() {
+        let chunks = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([
+                Constraint::Percentage(50),
+                Constraint::Percentage(50),
+            ])
+            .split(area);
+
+        draw_metrics_table(frame, chunks[0], app);
+
+        if let Some(idx) = app.table_state.selected() {
+            if let Some(group) = app.metrics_data.get(idx) {
+                draw_metric_detail_panel(frame, chunks[1], group);
+            }
+        }
+    } else {
+        draw_metrics_table(frame, area, app);
+    }
+}
+
+fn draw_metric_detail_panel(frame: &mut Frame, area: Rect, group: &MetricGroup) {
+    let section_style = Style::default()
+        .fg(Color::Cyan)
+        .add_modifier(Modifier::BOLD);
+    let key_style = Style::default().fg(Color::DarkGray);
+
+    let mut lines: Vec<Line<'static>> = Vec::new();
+
+    // Metadata
+    lines.push(Line::from(Span::styled("Metadata", section_style)));
+    lines.push(Line::from(vec![
+        Span::styled("  Name:     ", key_style),
+        Span::raw(group.name.clone()),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled("  Type:     ", key_style),
+        Span::raw(group.metric_type.clone()),
+    ]));
+    if !group.description.is_empty() {
+        lines.push(Line::from(vec![
+            Span::styled("  Desc:     ", key_style),
+            Span::raw(group.description.clone()),
+        ]));
+    }
+    if !group.unit.is_empty() {
+        lines.push(Line::from(vec![
+            Span::styled("  Unit:     ", key_style),
+            Span::raw(group.unit.clone()),
+        ]));
+    }
+    lines.push(Line::from(vec![
+        Span::styled("  Services: ", key_style),
+        Span::raw(group.service_names.join(", ")),
+    ]));
+
+    // Data Points
+    if !group.data_points.is_empty() {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            format!("Data Points ({})", group.data_points.len()),
+            section_style,
+        )));
+        for dp in group.data_points.iter().rev().take(20) {
+            lines.push(Line::from(vec![
+                Span::styled("  ", key_style),
+                Span::styled(format!("{} ", dp.timestamp), key_style),
+                Span::raw(dp.value.clone()),
+            ]));
+            if !dp.attributes.is_empty() {
+                let attrs: Vec<String> = dp
+                    .attributes
+                    .iter()
+                    .map(|(k, v)| format!("{}={}", k, v))
+                    .collect();
+                lines.push(Line::from(Span::styled(
+                    format!("    {}", attrs.join(" ")),
+                    Style::default().fg(Color::DarkGray),
+                )));
+            }
+        }
+        if group.data_points.len() > 20 {
+            lines.push(Line::from(Span::styled(
+                format!("  ... and {} more", group.data_points.len() - 20),
+                Style::default().fg(Color::DarkGray),
+            )));
+        }
+    }
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title("Detail")
+        .border_style(Style::default().fg(Color::Cyan));
+
+    let text = Text::from(lines);
+    let paragraph = Paragraph::new(text).block(block).wrap(Wrap { trim: false });
+    frame.render_widget(paragraph, area);
 }
 
 fn draw_status_bar(frame: &mut Frame, area: Rect, app: &App) {
