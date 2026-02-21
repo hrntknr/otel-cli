@@ -172,6 +172,8 @@ async fn test_e2e_log_query() {
             severity: String::new(),
             attributes: Default::default(),
             limit: 100,
+            start_time_unix_nano: 0,
+            end_time_unix_nano: 0,
         })
         .await
         .unwrap();

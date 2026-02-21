@@ -5,7 +5,9 @@ use crate::proto::opentelemetry::proto::metrics::v1::{
     metric, number_data_point, ResourceMetrics,
 };
 
-use super::{format_attributes_json, format_timestamp, get_service_name};
+use super::{
+    extract_any_value_string, format_attributes_json, format_timestamp, get_resource_attributes,
+};
 
 pub async fn query_metrics(
     server: &str,
@@ -30,6 +32,9 @@ pub async fn query_metrics(
         }
         OutputFormat::Text => {
             print_metrics_text(&response.resource_metrics);
+        }
+        OutputFormat::Toon => {
+            print_metrics_toon(&response.resource_metrics)?;
         }
     }
 
@@ -57,14 +62,22 @@ fn format_number_value(value: &Option<number_data_point::Value>) -> String {
 
 fn print_metrics_text(resource_metrics: &[ResourceMetrics]) {
     for rm in resource_metrics {
-        let service_name = get_service_name(&rm.resource);
+        let resource_attrs = get_resource_attributes(&rm.resource);
         for sm in &rm.scope_metrics {
             for m in &sm.metrics {
                 let type_name = metric_type_name(&m.data);
-                println!(
-                    "Metric: {} ({}) | Service: {}",
-                    m.name, type_name, service_name
-                );
+                println!("Metric: {} ({})", m.name, type_name);
+                if !resource_attrs.is_empty() {
+                    println!("  Resource:");
+                    for kv in resource_attrs {
+                        let val = kv
+                            .value
+                            .as_ref()
+                            .map(extract_any_value_string)
+                            .unwrap_or_default();
+                        println!("    {}: {}", kv.key, val);
+                    }
+                }
                 println!("  Data points:");
                 match &m.data {
                     Some(metric::Data::Gauge(g)) => {
@@ -124,11 +137,11 @@ fn print_metrics_text(resource_metrics: &[ResourceMetrics]) {
     }
 }
 
-fn print_metrics_json(resource_metrics: &[ResourceMetrics]) -> anyhow::Result<()> {
+fn build_metrics_value(resource_metrics: &[ResourceMetrics]) -> Vec<serde_json::Value> {
     let mut metrics = Vec::new();
 
     for rm in resource_metrics {
-        let service_name = get_service_name(&rm.resource);
+        let resource_attrs = get_resource_attributes(&rm.resource);
         for sm in &rm.scope_metrics {
             for m in &sm.metrics {
                 let type_name = metric_type_name(&m.data);
@@ -137,7 +150,7 @@ fn print_metrics_json(resource_metrics: &[ResourceMetrics]) -> anyhow::Result<()
                 let entry = serde_json::json!({
                     "name": m.name,
                     "type": type_name,
-                    "service_name": service_name,
+                    "resource_attributes": format_attributes_json(resource_attrs),
                     "data_points": data_points,
                 });
                 metrics.push(entry);
@@ -145,7 +158,18 @@ fn print_metrics_json(resource_metrics: &[ResourceMetrics]) -> anyhow::Result<()
         }
     }
 
+    metrics
+}
+
+fn print_metrics_json(resource_metrics: &[ResourceMetrics]) -> anyhow::Result<()> {
+    let metrics = build_metrics_value(resource_metrics);
     println!("{}", serde_json::to_string_pretty(&metrics)?);
+    Ok(())
+}
+
+fn print_metrics_toon(resource_metrics: &[ResourceMetrics]) -> anyhow::Result<()> {
+    let metrics = build_metrics_value(resource_metrics);
+    println!("{}", toon_format::encode_default(&serde_json::json!(metrics))?);
     Ok(())
 }
 

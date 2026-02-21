@@ -33,6 +33,13 @@ pub fn extract_any_value_string(value: &AnyValue) -> String {
     }
 }
 
+pub fn get_resource_attributes(resource: &Option<Resource>) -> &[KeyValue] {
+    match resource {
+        Some(r) => &r.attributes,
+        None => &[],
+    }
+}
+
 pub fn get_service_name(resource: &Option<Resource>) -> String {
     resource
         .as_ref()

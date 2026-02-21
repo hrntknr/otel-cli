@@ -3,7 +3,10 @@ use crate::proto::otelcli::query::v1::query_service_client::QueryServiceClient;
 use crate::proto::otelcli::query::v1::QueryTracesRequest;
 use crate::proto::opentelemetry::proto::trace::v1::ResourceSpans;
 
-use super::{format_attributes_json, format_timestamp, get_service_name, hex_encode};
+use super::{
+    extract_any_value_string, format_attributes_json, format_timestamp, get_resource_attributes,
+    hex_encode,
+};
 
 pub async fn query_traces(
     server: &str,
@@ -31,6 +34,9 @@ pub async fn query_traces(
         OutputFormat::Text => {
             print_traces_text(&response.resource_spans);
         }
+        OutputFormat::Toon => {
+            print_traces_toon(&response.resource_spans)?;
+        }
     }
 
     Ok(())
@@ -38,7 +44,7 @@ pub async fn query_traces(
 
 fn print_traces_text(resource_spans: &[ResourceSpans]) {
     for rs in resource_spans {
-        let service_name = get_service_name(&rs.resource);
+        let resource_attrs = get_resource_attributes(&rs.resource);
         for ss in &rs.scope_spans {
             for span in &ss.spans {
                 let trace_id = hex_encode(&span.trace_id);
@@ -52,10 +58,7 @@ fn print_traces_text(resource_spans: &[ResourceSpans]) {
                     .end_time_unix_nano
                     .saturating_sub(span.start_time_unix_nano);
 
-                println!(
-                    "Trace: {} | Service: {}",
-                    trace_id, service_name
-                );
+                println!("Trace: {}", trace_id);
                 println!("  Span: {} [{}]", span.name, span_id);
                 println!("    Status: {}", status_code);
                 println!(
@@ -63,13 +66,24 @@ fn print_traces_text(resource_spans: &[ResourceSpans]) {
                     format_timestamp(span.start_time_unix_nano),
                     duration
                 );
+                if !resource_attrs.is_empty() {
+                    println!("    Resource:");
+                    for kv in resource_attrs {
+                        let val = kv
+                            .value
+                            .as_ref()
+                            .map(extract_any_value_string)
+                            .unwrap_or_default();
+                        println!("      {}: {}", kv.key, val);
+                    }
+                }
                 if !span.attributes.is_empty() {
                     println!("    Attributes:");
                     for kv in &span.attributes {
                         let val = kv
                             .value
                             .as_ref()
-                            .map(super::extract_any_value_string)
+                            .map(extract_any_value_string)
                             .unwrap_or_default();
                         println!("      {}: {}", kv.key, val);
                     }
@@ -79,11 +93,11 @@ fn print_traces_text(resource_spans: &[ResourceSpans]) {
     }
 }
 
-fn print_traces_json(resource_spans: &[ResourceSpans]) -> anyhow::Result<()> {
+fn build_traces_value(resource_spans: &[ResourceSpans]) -> Vec<serde_json::Value> {
     let mut traces = Vec::new();
 
     for rs in resource_spans {
-        let service_name = get_service_name(&rs.resource);
+        let resource_attrs = get_resource_attributes(&rs.resource);
         for ss in &rs.scope_spans {
             for span in &ss.spans {
                 let trace_id = hex_encode(&span.trace_id);
@@ -97,7 +111,7 @@ fn print_traces_json(resource_spans: &[ResourceSpans]) -> anyhow::Result<()> {
                 let entry = serde_json::json!({
                     "trace_id": trace_id,
                     "span_id": span_id,
-                    "service_name": service_name,
+                    "resource_attributes": format_attributes_json(resource_attrs),
                     "name": span.name,
                     "status": status_code,
                     "start_time": format_timestamp(span.start_time_unix_nano),
@@ -109,6 +123,17 @@ fn print_traces_json(resource_spans: &[ResourceSpans]) -> anyhow::Result<()> {
         }
     }
 
+    traces
+}
+
+fn print_traces_json(resource_spans: &[ResourceSpans]) -> anyhow::Result<()> {
+    let traces = build_traces_value(resource_spans);
     println!("{}", serde_json::to_string_pretty(&traces)?);
+    Ok(())
+}
+
+fn print_traces_toon(resource_spans: &[ResourceSpans]) -> anyhow::Result<()> {
+    let traces = build_traces_value(resource_spans);
+    println!("{}", toon_format::encode_default(&serde_json::json!(traces))?);
     Ok(())
 }

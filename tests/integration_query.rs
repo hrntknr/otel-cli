@@ -185,6 +185,8 @@ async fn test_query_logs_with_severity_filter() {
             severity: "ERROR".into(),
             attributes: Default::default(),
             limit: 100,
+            start_time_unix_nano: 0,
+            end_time_unix_nano: 0,
         })
         .await
         .unwrap();
@@ -192,6 +194,115 @@ async fn test_query_logs_with_severity_filter() {
     let logs = response.into_inner().resource_logs;
     assert_eq!(logs.len(), 1);
     assert_eq!(logs[0].scope_logs[0].log_records[0].severity_text, "ERROR");
+}
+
+#[tokio::test]
+async fn test_query_logs_severity_ge() {
+    let grpc_port = get_available_port();
+    let query_port = get_available_port();
+    let (_store, _shutdown) = start_servers(grpc_port, query_port).await;
+    let addr = format!("http://127.0.0.1:{}", grpc_port);
+    let query_addr = format!("http://127.0.0.1:{}", query_port);
+
+    // Ingest logs: DEBUG(5), INFO(9), WARN(13), ERROR(17)
+    let mut logs_client = LogsServiceClient::connect(addr.clone()).await.unwrap();
+    let severities = [("DEBUG", 5), ("INFO", 9), ("WARN", 13), ("ERROR", 17)];
+    for (text, num) in &severities {
+        logs_client
+            .export(ExportLogsServiceRequest {
+                resource_logs: vec![ResourceLogs {
+                    resource: make_resource("log-svc"),
+                    scope_logs: vec![ScopeLogs {
+                        scope: None,
+                        log_records: vec![LogRecord {
+                            severity_text: text.to_string(),
+                            severity_number: *num,
+                            ..Default::default()
+                        }],
+                        schema_url: String::new(),
+                    }],
+                    schema_url: String::new(),
+                }],
+            })
+            .await
+            .unwrap();
+    }
+
+    // Query with severity WARN -> should get WARN(13) and ERROR(17) via Ge
+    let mut query_client = QueryServiceClient::connect(query_addr).await.unwrap();
+    let response = query_client
+        .query_logs(QueryLogsRequest {
+            service_name: String::new(),
+            severity: "WARN".into(),
+            attributes: Default::default(),
+            limit: 100,
+            start_time_unix_nano: 0,
+            end_time_unix_nano: 0,
+        })
+        .await
+        .unwrap();
+
+    let logs = response.into_inner().resource_logs;
+    assert_eq!(logs.len(), 2);
+    let mut sev_numbers: Vec<i32> = logs
+        .iter()
+        .flat_map(|rl| {
+            rl.scope_logs
+                .iter()
+                .flat_map(|sl| sl.log_records.iter().map(|lr| lr.severity_number))
+        })
+        .collect();
+    sev_numbers.sort();
+    assert_eq!(sev_numbers, vec![13, 17]);
+}
+
+#[tokio::test]
+async fn test_query_logs_with_service_name_filter() {
+    let grpc_port = get_available_port();
+    let query_port = get_available_port();
+    let (_store, _shutdown) = start_servers(grpc_port, query_port).await;
+    let addr = format!("http://127.0.0.1:{}", grpc_port);
+    let query_addr = format!("http://127.0.0.1:{}", query_port);
+
+    // Ingest logs from two services
+    let mut logs_client = LogsServiceClient::connect(addr.clone()).await.unwrap();
+    for svc in &["frontend", "backend", "frontend"] {
+        logs_client
+            .export(ExportLogsServiceRequest {
+                resource_logs: vec![ResourceLogs {
+                    resource: make_resource(svc),
+                    scope_logs: vec![ScopeLogs {
+                        scope: None,
+                        log_records: vec![LogRecord {
+                            severity_text: "INFO".into(),
+                            severity_number: 9,
+                            ..Default::default()
+                        }],
+                        schema_url: String::new(),
+                    }],
+                    schema_url: String::new(),
+                }],
+            })
+            .await
+            .unwrap();
+    }
+
+    // Query filtering by service_name = "frontend"
+    let mut query_client = QueryServiceClient::connect(query_addr).await.unwrap();
+    let response = query_client
+        .query_logs(QueryLogsRequest {
+            service_name: "frontend".into(),
+            severity: String::new(),
+            attributes: Default::default(),
+            limit: 100,
+            start_time_unix_nano: 0,
+            end_time_unix_nano: 0,
+        })
+        .await
+        .unwrap();
+
+    let logs = response.into_inner().resource_logs;
+    assert_eq!(logs.len(), 2);
 }
 
 #[tokio::test]

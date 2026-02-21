@@ -10,6 +10,7 @@ import "opentelemetry/proto/resource/v1/resource.proto";
 service QueryService {
   rpc QueryTraces(QueryTracesRequest) returns (QueryTracesResponse);
   rpc QueryLogs(QueryLogsRequest) returns (QueryLogsResponse);
+  rpc FollowLogs(QueryLogsRequest) returns (stream QueryLogsResponse);
   rpc QueryMetrics(QueryMetricsRequest) returns (QueryMetricsResponse);
   rpc ClearTraces(ClearTracesRequest) returns (ClearResponse);
   rpc ClearLogs(ClearLogsRequest) returns (ClearResponse);
@@ -32,6 +33,8 @@ message QueryLogsRequest {
   string severity = 2;
   map<string, string> attributes = 3;
   int32 limit = 4;
+  uint64 start_time_unix_nano = 5;
+  uint64 end_time_unix_nano = 6;
 }
 
 message QueryLogsResponse {

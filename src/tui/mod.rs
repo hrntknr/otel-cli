@@ -452,6 +452,7 @@ impl App {
                 severity: popup.severity,
                 attribute_conditions: popup.attribute_conditions,
                 resource_conditions: popup.resource_conditions,
+                ..Default::default()
             };
             self.pending_refresh = true;
         }

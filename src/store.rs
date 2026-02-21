@@ -64,9 +64,12 @@ pub struct SeverityCondition {
 
 #[derive(Default, Clone, Debug)]
 pub struct LogFilter {
+    pub service_name: Option<String>,
     pub severity: Option<SeverityCondition>,
     pub attribute_conditions: Vec<FilterCondition>,
     pub resource_conditions: Vec<FilterCondition>,
+    pub start_time_ns: Option<u64>,
+    pub end_time_ns: Option<u64>,
 }
 
 #[derive(Default)]
@@ -81,6 +84,10 @@ fn trace_sort_key(rs: &ResourceSpans) -> u64 {
         .flat_map(|ss| ss.spans.iter().map(|s| s.start_time_unix_nano))
         .min()
         .unwrap_or(0)
+}
+
+pub fn log_sort_key_pub(rl: &ResourceLogs) -> u64 {
+    log_sort_key(rl)
 }
 
 fn log_sort_key(rl: &ResourceLogs) -> u64 {
@@ -365,6 +372,28 @@ impl Store {
                     .as_ref()
                     .map(|r| r.attributes.as_slice())
                     .unwrap_or_default();
+
+                // Service name filter
+                if let Some(ref service_name) = filter.service_name {
+                    if get_attribute_string(resource_attrs, "service.name").as_deref()
+                        != Some(service_name.as_str())
+                    {
+                        return false;
+                    }
+                }
+
+                // Time range filter
+                let ts = log_sort_key(rl);
+                if let Some(start) = filter.start_time_ns {
+                    if ts < start {
+                        return false;
+                    }
+                }
+                if let Some(end) = filter.end_time_ns {
+                    if ts > end {
+                        return false;
+                    }
+                }
 
                 // Resource conditions
                 for cond in &filter.resource_conditions {
@@ -952,5 +981,78 @@ mod tests {
         let result = store.query_logs(&LogFilter::default(), 100);
         let names: Vec<_> = result.iter().map(|rl| get_log_svc_name(rl)).collect();
         assert_eq!(names, vec!["svc-100", "svc-200", "svc-300"]);
+    }
+
+    #[test]
+    fn filter_logs_by_service_name_field() {
+        let (mut store, _rx) = Store::new(100);
+        store.insert_logs(vec![
+            make_resource_logs("frontend", "INFO", &[]),
+            make_resource_logs("backend", "WARN", &[]),
+            make_resource_logs("frontend", "ERROR", &[]),
+        ]);
+        let filter = LogFilter {
+            service_name: Some("frontend".into()),
+            ..Default::default()
+        };
+        let result = store.query_logs(&filter, 100);
+        assert_eq!(result.len(), 2);
+        for rl in &result {
+            assert_eq!(get_log_svc_name(rl), "frontend");
+        }
+    }
+
+    #[test]
+    fn filter_logs_by_time_range() {
+        let (mut store, _rx) = Store::new(100);
+        store.insert_logs(vec![
+            make_resource_logs_full("svc", "INFO", &[], 100),
+            make_resource_logs_full("svc", "INFO", &[], 200),
+            make_resource_logs_full("svc", "INFO", &[], 300),
+            make_resource_logs_full("svc", "INFO", &[], 400),
+        ]);
+
+        // start_time_ns only
+        let filter = LogFilter {
+            start_time_ns: Some(200),
+            ..Default::default()
+        };
+        assert_eq!(store.query_logs(&filter, 100).len(), 3);
+
+        // end_time_ns only
+        let filter = LogFilter {
+            end_time_ns: Some(300),
+            ..Default::default()
+        };
+        assert_eq!(store.query_logs(&filter, 100).len(), 3);
+
+        // both
+        let filter = LogFilter {
+            start_time_ns: Some(200),
+            end_time_ns: Some(300),
+            ..Default::default()
+        };
+        assert_eq!(store.query_logs(&filter, 100).len(), 2);
+    }
+
+    #[test]
+    fn filter_logs_combined_service_name_and_time() {
+        let (mut store, _rx) = Store::new(100);
+        store.insert_logs(vec![
+            make_resource_logs_full("frontend", "INFO", &[], 100),
+            make_resource_logs_full("backend", "INFO", &[], 200),
+            make_resource_logs_full("frontend", "WARN", &[], 300),
+            make_resource_logs_full("frontend", "ERROR", &[], 400),
+        ]);
+        let filter = LogFilter {
+            service_name: Some("frontend".into()),
+            start_time_ns: Some(200),
+            ..Default::default()
+        };
+        let result = store.query_logs(&filter, 100);
+        assert_eq!(result.len(), 2);
+        for rl in &result {
+            assert_eq!(get_log_svc_name(rl), "frontend");
+        }
     }
 }

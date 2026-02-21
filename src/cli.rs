@@ -35,7 +35,7 @@ pub enum Commands {
         /// Filter by service name
         #[arg(long)]
         service: Option<String>,
-        /// Filter by severity
+        /// Filter by severity (shows logs at this level and above)
         #[arg(long)]
         severity: Option<String>,
         /// Filter by attributes (key=value)
@@ -47,6 +47,15 @@ pub enum Commands {
         /// Output format
         #[arg(long, default_value = "text")]
         format: OutputFormat,
+        /// Follow new logs in real-time
+        #[arg(short = 'f', long)]
+        follow: bool,
+        /// Show logs since (e.g. 30s, 5m, 1h, 2d, or RFC3339)
+        #[arg(long)]
+        since: Option<String>,
+        /// Show logs until (e.g. 30s, 5m, 1h, 2d, or RFC3339)
+        #[arg(long)]
+        until: Option<String>,
     },
     /// Query traces from server
     Trace {
@@ -108,6 +117,7 @@ pub enum Commands {
 pub enum OutputFormat {
     Text,
     Json,
+    Toon,
 }
 
 fn parse_key_val(s: &str) -> Result<(String, String), String> {
@@ -200,6 +210,9 @@ mod tests {
                 attribute,
                 limit,
                 format,
+                follow,
+                since,
+                until,
             } => {
                 assert_eq!(server, "http://localhost:4319");
                 assert_eq!(service, Some("my-service".to_string()));
@@ -208,6 +221,9 @@ mod tests {
                     attribute,
                     vec![("env".to_string(), "production".to_string())]
                 );
+                assert!(!follow);
+                assert!(since.is_none());
+                assert!(until.is_none());
                 assert_eq!(limit, 50);
                 assert!(matches!(format, OutputFormat::Json));
             }

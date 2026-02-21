@@ -155,6 +155,8 @@ async fn test_grpc_logs_ingest_and_query() {
             severity: String::new(),
             attributes: Default::default(),
             limit: 10,
+            start_time_unix_nano: 0,
+            end_time_unix_nano: 0,
         })
         .await
         .unwrap();

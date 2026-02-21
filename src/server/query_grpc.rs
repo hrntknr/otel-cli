@@ -1,3 +1,6 @@
+use std::pin::Pin;
+
+use tokio_stream::{wrappers::BroadcastStream, Stream, StreamExt};
 use tonic::{Request, Response, Status};
 
 use crate::proto::otelcli::query::v1::{
@@ -7,7 +10,7 @@ use crate::proto::otelcli::query::v1::{
 };
 use crate::store::{
     FilterCondition, FilterOperator, LogFilter, MetricFilter, SeverityCondition, SharedStore,
-    TraceFilter,
+    StoreEvent, TraceFilter,
 };
 
 pub struct QueryGrpcService {
@@ -34,8 +37,36 @@ fn effective_limit(limit: i32) -> usize {
     if limit <= 0 { 100 } else { limit as usize }
 }
 
+fn build_log_filter(req: &QueryLogsRequest) -> LogFilter {
+    let mut filter = LogFilter::default();
+    filter.service_name = non_empty(&req.service_name);
+    if let Some(sev) = non_empty(&req.severity) {
+        filter.severity = Some(SeverityCondition {
+            operator: FilterOperator::Ge,
+            value: sev,
+        });
+    }
+    for (k, v) in &req.attributes {
+        filter.attribute_conditions.push(FilterCondition {
+            field: k.clone(),
+            operator: FilterOperator::Eq,
+            value: v.clone(),
+        });
+    }
+    if req.start_time_unix_nano != 0 {
+        filter.start_time_ns = Some(req.start_time_unix_nano);
+    }
+    if req.end_time_unix_nano != 0 {
+        filter.end_time_ns = Some(req.end_time_unix_nano);
+    }
+    filter
+}
+
 #[tonic::async_trait]
 impl QueryServiceTrait for QueryGrpcService {
+    type FollowLogsStream =
+        Pin<Box<dyn Stream<Item = Result<QueryLogsResponse, Status>> + Send + 'static>>;
+
     async fn query_traces(
         &self,
         request: Request<QueryTracesRequest>,
@@ -57,24 +88,74 @@ impl QueryServiceTrait for QueryGrpcService {
         request: Request<QueryLogsRequest>,
     ) -> Result<Response<QueryLogsResponse>, Status> {
         let req = request.into_inner();
-        let mut filter = LogFilter::default();
-        if let Some(sev) = non_empty(&req.severity) {
-            filter.severity = Some(SeverityCondition {
-                operator: FilterOperator::Eq,
-                value: sev,
-            });
-        }
-        for (k, v) in req.attributes {
-            filter.attribute_conditions.push(FilterCondition {
-                field: k,
-                operator: FilterOperator::Eq,
-                value: v,
-            });
-        }
+        let filter = build_log_filter(&req);
         let limit = effective_limit(req.limit);
         let store = self.store.read().await;
         let resource_logs = store.query_logs(&filter, limit);
         Ok(Response::new(QueryLogsResponse { resource_logs }))
+    }
+
+    async fn follow_logs(
+        &self,
+        request: Request<QueryLogsRequest>,
+    ) -> Result<Response<Self::FollowLogsStream>, Status> {
+        let req = request.into_inner();
+        let limit = effective_limit(req.limit);
+        let store = self.store.clone();
+
+        // Initial batch
+        let filter = build_log_filter(&req);
+        let initial_logs = {
+            let s = store.read().await;
+            s.query_logs(&filter, limit)
+        };
+
+        // Track the latest timestamp we've sent so we can send only newer logs
+        let mut last_ts: u64 = initial_logs
+            .iter()
+            .map(|rl| crate::store::log_sort_key_pub(rl))
+            .max()
+            .unwrap_or(0);
+
+        let event_rx = store.read().await.subscribe();
+        let event_stream = BroadcastStream::new(event_rx);
+
+        let stream = async_stream::try_stream! {
+            // Send initial batch
+            if !initial_logs.is_empty() {
+                yield QueryLogsResponse { resource_logs: initial_logs };
+            }
+
+            // Wait for new log events
+            tokio::pin!(event_stream);
+            while let Some(event_result) = event_stream.next().await {
+                let event = match event_result {
+                    Ok(e) => e,
+                    Err(_) => continue, // lagged, skip
+                };
+                if !matches!(event, StoreEvent::LogsAdded) {
+                    continue;
+                }
+
+                // Query only logs newer than the last sent
+                let mut delta_filter = build_log_filter(&req);
+                delta_filter.start_time_ns = Some(last_ts + 1);
+
+                let new_logs = {
+                    let s = store.read().await;
+                    s.query_logs(&delta_filter, limit)
+                };
+
+                if !new_logs.is_empty() {
+                    if let Some(max_ts) = new_logs.iter().map(|rl| crate::store::log_sort_key_pub(rl)).max() {
+                        last_ts = max_ts;
+                    }
+                    yield QueryLogsResponse { resource_logs: new_logs };
+                }
+            }
+        };
+
+        Ok(Response::new(Box::pin(stream)))
     }
 
     async fn query_metrics(

@@ -72,8 +72,21 @@ async fn main() -> anyhow::Result<()> {
             attribute,
             limit,
             format,
+            follow,
+            since,
+            until,
         } => {
-            client::log::query_logs(&server, service, severity, attribute, limit, &format).await?;
+            if follow {
+                client::log::follow_logs(
+                    &server, service, severity, attribute, limit, &format, since, until,
+                )
+                .await?;
+            } else {
+                client::log::query_logs(
+                    &server, service, severity, attribute, limit, &format, since, until,
+                )
+                .await?;
+            }
             Ok(())
         }
         Commands::Trace {
