@@ -23,7 +23,9 @@ use crate::proto::opentelemetry::proto::{
     metrics::v1::{metric, ResourceMetrics},
     trace::v1::ResourceSpans,
 };
-use crate::store::{SharedStore, StoreEvent};
+use crate::store::{
+    FilterCondition, FilterOperator, LogFilter, SeverityCondition, SharedStore, StoreEvent,
+};
 
 pub struct TraceSummary {
     pub trace_id: String,
@@ -64,6 +66,136 @@ pub struct LogRow {
     pub resource_attributes: Vec<(String, String)>,
 }
 
+#[derive(Clone)]
+pub enum FilterSection {
+    Attribute,
+    ResourceAttribute,
+}
+
+pub const SEVERITY_LEVELS: &[&str] = &["TRACE", "DEBUG", "INFO", "WARN", "ERROR", "FATAL"];
+
+pub enum FilterPopupMode {
+    /// Main list: 3 sections of filter conditions
+    List { selected: usize },
+    /// Severity level picker
+    SelectSeverity { selected: usize },
+    /// Field selection (for Attribute/ResourceAttribute)
+    SelectField {
+        section: FilterSection,
+        candidates: Vec<String>,
+        selected: usize,
+        input: String,
+    },
+    /// Operator selection
+    SelectOperator {
+        section: FilterSection,
+        field: String,
+        selected: usize,
+    },
+    /// Value input
+    InputValue {
+        section: FilterSection,
+        field: String,
+        operator: FilterOperator,
+        value: String,
+    },
+}
+
+pub struct LogFilterPopup {
+    pub mode: FilterPopupMode,
+    pub severity: Option<SeverityCondition>,
+    pub attribute_conditions: Vec<FilterCondition>,
+    pub resource_conditions: Vec<FilterCondition>,
+}
+
+impl LogFilterPopup {
+    /// Total items in the list view
+    pub fn list_item_count(&self) -> usize {
+        filter_list_item_count(
+            self.attribute_conditions.len(),
+            self.resource_conditions.len(),
+        )
+    }
+
+    /// Determine what kind of item is at a given list index
+    pub fn item_at(&self, idx: usize) -> ListItem {
+        filter_item_at(
+            idx,
+            self.attribute_conditions.len(),
+            self.resource_conditions.len(),
+        )
+    }
+}
+
+/// Free function to compute list item count (avoids borrow issues)
+fn filter_list_item_count(na: usize, nr: usize) -> usize {
+    // Severity + attrs + [+]Add Attr + resource attrs + [+]Add Resource + [Apply]
+    1 + na + 1 + nr + 1 + 1
+}
+
+/// Free function to determine item at given index (avoids borrow issues)
+fn filter_item_at(idx: usize, na: usize, nr: usize) -> ListItem {
+    if idx == 0 {
+        ListItem::Severity
+    } else if idx <= na {
+        ListItem::AttributeCondition(idx - 1)
+    } else if idx == na + 1 {
+        ListItem::AddAttribute
+    } else if idx <= na + 1 + nr {
+        ListItem::ResourceCondition(idx - na - 2)
+    } else if idx == na + nr + 2 {
+        ListItem::AddResourceAttribute
+    } else {
+        ListItem::Apply
+    }
+}
+
+pub enum ListItem {
+    Severity,
+    AttributeCondition(usize),
+    AddAttribute,
+    ResourceCondition(usize),
+    AddResourceAttribute,
+    Apply,
+}
+
+pub const ALL_OPERATORS: &[FilterOperator] = &[
+    FilterOperator::Eq,
+    FilterOperator::Contains,
+    FilterOperator::NotEq,
+    FilterOperator::NotContains,
+    FilterOperator::Ge,
+    FilterOperator::Gt,
+    FilterOperator::Le,
+    FilterOperator::Lt,
+];
+
+pub fn operator_symbol(op: &FilterOperator) -> &'static str {
+    match op {
+        FilterOperator::Eq => "=",
+        FilterOperator::Contains => "\u{2283}",
+        FilterOperator::NotEq => "\u{2260}",
+        FilterOperator::NotContains => "\u{2285}",
+        FilterOperator::Ge => ">=",
+        FilterOperator::Gt => ">",
+        FilterOperator::Le => "<=",
+        FilterOperator::Lt => "<",
+    }
+}
+
+pub fn operator_label(op: &FilterOperator) -> &'static str {
+    match op {
+        FilterOperator::Eq => "equals",
+        FilterOperator::Contains => "contains",
+        FilterOperator::NotEq => "not equals",
+        FilterOperator::NotContains => "not contains",
+        FilterOperator::Ge => "greater or equal",
+        FilterOperator::Gt => "greater than",
+        FilterOperator::Le => "less or equal",
+        FilterOperator::Lt => "less than",
+    }
+}
+
 pub struct MetricRow {
     pub name: String,
     pub metric_type: String,
@@ -92,6 +224,11 @@ pub struct App {
     pub detail_panel_percent: u16,
     pub content_area: ratatui::layout::Rect,
     dragging_split: bool,
+    pub log_filter_popup: Option<LogFilterPopup>,
+    pub log_filter: LogFilter,
+    pub available_log_fields: Vec<String>,
+    pub available_resource_fields: Vec<String>,
+    pending_refresh: bool,
 }
 
 impl App {
@@ -118,6 +255,11 @@ impl App {
             detail_panel_percent: 40,
             content_area: ratatui::layout::Rect::default(),
             dragging_split: false,
+            log_filter_popup: None,
+            log_filter: LogFilter::default(),
+            available_log_fields: Vec::new(),
+            available_resource_fields: Vec::new(),
+            pending_refresh: false,
         }
     }
 
@@ -142,6 +284,11 @@ impl App {
                 self.clear_current_tab().await;
             }
 
+            if self.pending_refresh {
+                self.pending_refresh = false;
+                self.refresh_data().await;
+            }
+
             if self.should_quit {
                 return Ok(());
             }
@@ -152,6 +299,13 @@ impl App {
         if key.kind != crossterm::event::KeyEventKind::Press {
             return;
         }
+
+        // Route to popup if open
+        if self.log_filter_popup.is_some() {
+            self.handle_filter_popup_key(key);
+            return;
+        }
+
         match key.code {
             KeyCode::Char('q') => self.should_quit = true,
             KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -202,6 +356,11 @@ impl App {
                     }
                 }
             }
+            KeyCode::Char('/') => {
+                if self.current_tab == tabs::Tab::Logs {
+                    self.open_filter_popup();
+                }
+            }
             KeyCode::Char('c') => {
                 self.pending_clear = true;
             }
@@ -215,6 +374,330 @@ impl App {
                 self.table_state.select(None);
             }
             _ => {}
+        }
+    }
+
+    fn open_filter_popup(&mut self) {
+        self.log_filter_popup = Some(LogFilterPopup {
+            mode: FilterPopupMode::List { selected: 0 },
+            severity: self.log_filter.severity.clone(),
+            attribute_conditions: self.log_filter.attribute_conditions.clone(),
+            resource_conditions: self.log_filter.resource_conditions.clone(),
+        });
+    }
+
+    fn apply_filter_popup(&mut self) {
+        if let Some(popup) = self.log_filter_popup.take() {
+            self.log_filter = LogFilter {
+                severity: popup.severity,
+                attribute_conditions: popup.attribute_conditions,
+                resource_conditions: popup.resource_conditions,
+            };
+            self.pending_refresh = true;
+        }
+    }
+
+    pub fn log_filter_condition_count(&self) -> usize {
+        let mut count = 0;
+        if self.log_filter.severity.is_some() {
+            count += 1;
+        }
+        count += self.log_filter.attribute_conditions.len();
+        count += self.log_filter.resource_conditions.len();
+        count
+    }
+
+    fn handle_filter_popup_key(&mut self, key: crossterm::event::KeyEvent) {
+        let popup = self.log_filter_popup.as_mut().unwrap();
+        match &mut popup.mode {
+            FilterPopupMode::List { selected } => {
+                let na = popup.attribute_conditions.len();
+                let nr = popup.resource_conditions.len();
+                match key.code {
+                    KeyCode::Up | KeyCode::Char('k') => {
+                        if *selected > 0 {
+                            *selected -= 1;
+                        }
+                    }
+                    KeyCode::Down | KeyCode::Char('j') => {
+                        let max = filter_list_item_count(na, nr).saturating_sub(1);
+                        if *selected < max {
+                            *selected += 1;
+                        }
+                    }
+                    KeyCode::Enter => {
+                        let sel = *selected;
+                        match filter_item_at(sel, na, nr) {
+                            ListItem::Severity => {
+                                let current_idx = popup
+                                    .severity
+                                    .as_ref()
+                                    .and_then(|sev| {
+                                        SEVERITY_LEVELS
+                                            .iter()
+                                            .position(|l| l.eq_ignore_ascii_case(&sev.value))
+                                    })
+                                    .unwrap_or(0);
+                                popup.mode = FilterPopupMode::SelectSeverity {
+                                    selected: current_idx,
+                                };
+                            }
+                            ListItem::AttributeCondition(i) => {
+                                let cond = popup.attribute_conditions[i].clone();
+                                popup.attribute_conditions.remove(i);
+                                let candidates = self.available_log_fields.clone();
+                                popup.mode = FilterPopupMode::SelectField {
+                                    section: FilterSection::Attribute,
+                                    candidates,
+                                    selected: 0,
+                                    input: cond.field,
+                                };
+                            }
+                            ListItem::AddAttribute => {
+                                let candidates = self.available_log_fields.clone();
+                                popup.mode = FilterPopupMode::SelectField {
+                                    section: FilterSection::Attribute,
+                                    candidates,
+                                    selected: 0,
+                                    input: String::new(),
+                                };
+                            }
+                            ListItem::ResourceCondition(i) => {
+                                let cond = popup.resource_conditions[i].clone();
+                                popup.resource_conditions.remove(i);
+                                let candidates = self.available_resource_fields.clone();
+                                popup.mode = FilterPopupMode::SelectField {
+                                    section: FilterSection::ResourceAttribute,
+                                    candidates,
+                                    selected: 0,
+                                    input: cond.field,
+                                };
+                            }
+                            ListItem::AddResourceAttribute => {
+                                let candidates = self.available_resource_fields.clone();
+                                popup.mode = FilterPopupMode::SelectField {
+                                    section: FilterSection::ResourceAttribute,
+                                    candidates,
+                                    selected: 0,
+                                    input: String::new(),
+                                };
+                            }
+                            ListItem::Apply => {
+                                self.apply_filter_popup();
+                            }
+                        }
+                    }
+                    KeyCode::Char('d') | KeyCode::Delete => {
+                        let sel = *selected;
+                        match filter_item_at(sel, na, nr) {
+                            ListItem::Severity => {
+                                popup.severity = None;
+                            }
+                            ListItem::AttributeCondition(i) => {
+                                popup.attribute_conditions.remove(i);
+                                let max = filter_list_item_count(na - 1, nr)
+                                    .saturating_sub(1);
+                                if *selected > max {
+                                    *selected = max;
+                                }
+                            }
+                            ListItem::ResourceCondition(i) => {
+                                popup.resource_conditions.remove(i);
+                                let max = filter_list_item_count(na, nr - 1)
+                                    .saturating_sub(1);
+                                if *selected > max {
+                                    *selected = max;
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                    KeyCode::Esc => {
+                        self.log_filter_popup = None;
+                    }
+                    _ => {}
+                }
+            }
+            FilterPopupMode::SelectSeverity { selected } => match key.code {
+                KeyCode::Up | KeyCode::Char('k') => {
+                    if *selected > 0 {
+                        *selected -= 1;
+                    }
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    if *selected < SEVERITY_LEVELS.len() - 1 {
+                        *selected += 1;
+                    }
+                }
+                KeyCode::Enter => {
+                    let level = SEVERITY_LEVELS[*selected].to_string();
+                    let popup = self.log_filter_popup.as_mut().unwrap();
+                    popup.severity = Some(SeverityCondition {
+                        operator: FilterOperator::Ge,
+                        value: level,
+                    });
+                    popup.mode = FilterPopupMode::List { selected: 0 };
+                }
+                KeyCode::Esc => {
+                    let popup = self.log_filter_popup.as_mut().unwrap();
+                    popup.mode = FilterPopupMode::List { selected: 0 };
+                }
+                _ => {}
+            },
+            FilterPopupMode::SelectField {
+                section,
+                candidates,
+                selected,
+                input,
+            } => match key.code {
+                KeyCode::Char(c) => {
+                    input.push(c);
+                    *selected = 0;
+                }
+                KeyCode::Backspace => {
+                    input.pop();
+                    *selected = 0;
+                }
+                KeyCode::Up => {
+                    if *selected > 0 {
+                        *selected -= 1;
+                    }
+                }
+                KeyCode::Down => {
+                    let filtered: Vec<_> = candidates
+                        .iter()
+                        .filter(|c| {
+                            c.to_ascii_lowercase()
+                                .contains(&input.to_ascii_lowercase())
+                        })
+                        .collect();
+                    let max = filtered.len().saturating_sub(1);
+                    if *selected < max {
+                        *selected += 1;
+                    }
+                }
+                KeyCode::Enter => {
+                    let filtered: Vec<_> = candidates
+                        .iter()
+                        .filter(|c| {
+                            c.to_ascii_lowercase()
+                                .contains(&input.to_ascii_lowercase())
+                        })
+                        .cloned()
+                        .collect();
+                    let field = if let Some(f) = filtered.get(*selected) {
+                        f.clone()
+                    } else if !input.is_empty() {
+                        input.clone()
+                    } else {
+                        return;
+                    };
+                    let sec = section.clone();
+                    let popup = self.log_filter_popup.as_mut().unwrap();
+                    popup.mode = FilterPopupMode::SelectOperator {
+                        section: sec,
+                        field,
+                        selected: 0,
+                    };
+                }
+                KeyCode::Esc => {
+                    let popup = self.log_filter_popup.as_mut().unwrap();
+                    popup.mode = FilterPopupMode::List { selected: 0 };
+                }
+                _ => {}
+            },
+            FilterPopupMode::SelectOperator {
+                section,
+                field,
+                selected,
+            } => match key.code {
+                KeyCode::Up => {
+                    if *selected > 0 {
+                        *selected -= 1;
+                    }
+                }
+                KeyCode::Down => {
+                    let max = ALL_OPERATORS.len().saturating_sub(1);
+                    if *selected < max {
+                        *selected += 1;
+                    }
+                }
+                KeyCode::Enter => {
+                    let op = ALL_OPERATORS[*selected].clone();
+                    let sec = section.clone();
+                    let f = field.clone();
+                    let popup = self.log_filter_popup.as_mut().unwrap();
+                    popup.mode = FilterPopupMode::InputValue {
+                        section: sec,
+                        field: f,
+                        operator: op,
+                        value: String::new(),
+                    };
+                }
+                KeyCode::Esc => {
+                    let sec = section.clone();
+                    let f = field.clone();
+                    let candidates = match sec {
+                        FilterSection::Attribute => self.available_log_fields.clone(),
+                        FilterSection::ResourceAttribute => {
+                            self.available_resource_fields.clone()
+                        }
+                    };
+                    let popup = self.log_filter_popup.as_mut().unwrap();
+                    popup.mode = FilterPopupMode::SelectField {
+                        section: sec,
+                        candidates,
+                        selected: 0,
+                        input: f,
+                    };
+                }
+                _ => {}
+            },
+            FilterPopupMode::InputValue {
+                section,
+                field,
+                operator,
+                value,
+            } => match key.code {
+                KeyCode::Char(c) => {
+                    value.push(c);
+                }
+                KeyCode::Backspace => {
+                    value.pop();
+                }
+                KeyCode::Enter => {
+                    if value.is_empty() {
+                        return;
+                    }
+                    let cond = FilterCondition {
+                        field: field.clone(),
+                        operator: operator.clone(),
+                        value: value.clone(),
+                    };
+                    let sec = section.clone();
+                    let popup = self.log_filter_popup.as_mut().unwrap();
+                    match sec {
+                        FilterSection::Attribute => {
+                            popup.attribute_conditions.push(cond);
+                        }
+                        FilterSection::ResourceAttribute => {
+                            popup.resource_conditions.push(cond);
+                        }
+                    }
+                    popup.mode = FilterPopupMode::List { selected: 0 };
+                }
+                KeyCode::Esc => {
+                    let sec = section.clone();
+                    let f = field.clone();
+                    let popup = self.log_filter_popup.as_mut().unwrap();
+                    popup.mode = FilterPopupMode::SelectOperator {
+                        section: sec,
+                        field: f,
+                        selected: 0,
+                    };
+                }
+                _ => {}
+            },
         }
     }
 
@@ -385,17 +868,25 @@ impl App {
 
     async fn refresh_data(&mut self) {
         let store = self.store.read().await;
-        self.trace_count = store.trace_count();
         self.log_count = store.log_count();
         self.metric_count = store.metric_count();
 
         let traces = store.query_traces(&Default::default(), 500);
-        let logs = store.query_logs(&Default::default(), 500);
+
+        // Fetch all logs for field collection, then apply filter
+        let all_logs = store.query_logs(&LogFilter::default(), 500);
+        let filtered_logs = if self.log_filter_condition_count() > 0 {
+            store.query_logs(&self.log_filter, 500)
+        } else {
+            all_logs.clone()
+        };
+
         let metrics = store.query_metrics(&Default::default(), 500);
         drop(store);
 
         self.raw_traces = traces;
         self.trace_summaries = build_trace_summaries(&self.raw_traces);
+        self.trace_count = self.trace_summaries.len();
         if let TraceView::Timeline(ref trace_id) = self.trace_view {
             self.timeline_spans = build_timeline_spans(&self.raw_traces, trace_id);
         }
@@ -409,7 +900,10 @@ impl App {
             }
         }
 
-        self.logs_data = logs
+        // Collect available field names from all logs
+        self.update_available_fields(&all_logs);
+
+        self.logs_data = filtered_logs
             .into_iter()
             .flat_map(|rl| convert_log_rows(&rl))
             .collect();
@@ -423,6 +917,29 @@ impl App {
             .into_iter()
             .flat_map(|rm| convert_metric_rows(&rm))
             .collect();
+    }
+
+    fn update_available_fields(&mut self, logs: &[ResourceLogs]) {
+        let mut log_fields = std::collections::BTreeSet::new();
+        let mut resource_fields = std::collections::BTreeSet::new();
+
+        for rl in logs {
+            if let Some(ref resource) = rl.resource {
+                for kv in &resource.attributes {
+                    resource_fields.insert(kv.key.clone());
+                }
+            }
+            for sl in &rl.scope_logs {
+                for lr in &sl.log_records {
+                    for kv in &lr.attributes {
+                        log_fields.insert(kv.key.clone());
+                    }
+                }
+            }
+        }
+
+        self.available_log_fields = log_fields.into_iter().collect();
+        self.available_resource_fields = resource_fields.into_iter().collect();
     }
 }
 

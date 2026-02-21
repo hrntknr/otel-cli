@@ -2,7 +2,10 @@ use ratatui::prelude::*;
 use ratatui::widgets::*;
 
 use super::tabs::Tab;
-use super::{App, LogRow, TraceView};
+use super::{
+    operator_label, operator_symbol, App, FilterPopupMode, LogRow, TraceView, ALL_OPERATORS,
+    SEVERITY_LEVELS,
+};
 
 pub fn draw(frame: &mut Frame, app: &mut App) {
     let chunks = Layout::default()
@@ -30,6 +33,10 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     }
 
     draw_status_bar(frame, chunks[2], app);
+
+    if app.log_filter_popup.is_some() {
+        draw_filter_popup(frame, frame.area(), app);
+    }
 }
 
 fn draw_tabs(frame: &mut Frame, area: Rect, app: &App) {
@@ -246,9 +253,16 @@ fn draw_logs_table_basic(frame: &mut Frame, area: Rect, app: &mut App) {
         Constraint::Min(0),
     ];
 
+    let n = app.log_filter_condition_count();
+    let title = if n > 0 {
+        format!("Logs [filtered: {} conditions]", n)
+    } else {
+        "Logs".to_string()
+    };
+
     let table = Table::new(rows, widths)
         .header(header)
-        .block(Block::default().borders(Borders::ALL).title("Logs"))
+        .block(Block::default().borders(Borders::ALL).title(title))
         .row_highlight_style(Style::default().bg(Color::DarkGray))
         .highlight_symbol("▶ ");
 
@@ -397,7 +411,16 @@ fn draw_status_bar(frame: &mut Frame, area: Rect, app: &App) {
     let status = match app.current_tab {
         Tab::Logs => {
             let follow_str = if app.follow { "ON" } else { "OFF" };
-            format!("[f]ollow:{} | c:Clear | q:Quit", follow_str)
+            let n = app.log_filter_condition_count();
+            let filter_str = if n > 0 {
+                format!("/:Filter({})", n)
+            } else {
+                "/:Filter".to_string()
+            };
+            format!(
+                "{} | [f]ollow:{} | c:Clear | q:Quit",
+                filter_str, follow_str
+            )
         }
         Tab::Traces => {
             let follow_str = if app.follow { "ON" } else { "OFF" };
@@ -415,4 +438,343 @@ fn draw_status_bar(frame: &mut Frame, area: Rect, app: &App) {
     let paragraph =
         Paragraph::new(status).style(Style::default().fg(Color::Black).bg(Color::White));
     frame.render_widget(paragraph, area);
+}
+
+fn centered_rect(width: u16, height: u16, area: Rect) -> Rect {
+    let x = area.x + area.width.saturating_sub(width) / 2;
+    let y = area.y + area.height.saturating_sub(height) / 2;
+    Rect::new(x, y, width.min(area.width), height.min(area.height))
+}
+
+fn draw_filter_popup(frame: &mut Frame, area: Rect, app: &App) {
+    let popup = app.log_filter_popup.as_ref().unwrap();
+    match &popup.mode {
+        FilterPopupMode::List { selected } => {
+            draw_filter_list(frame, area, popup, *selected);
+        }
+        FilterPopupMode::SelectSeverity { selected } => {
+            draw_select_severity(frame, area, *selected);
+        }
+        FilterPopupMode::SelectField {
+            section: _,
+            candidates,
+            selected,
+            input,
+        } => {
+            draw_select_field(frame, area, candidates, *selected, input);
+        }
+        FilterPopupMode::SelectOperator {
+            section: _,
+            field,
+            selected,
+        } => {
+            draw_select_operator(frame, area, field, *selected);
+        }
+        FilterPopupMode::InputValue {
+            section: _,
+            field,
+            operator,
+            value,
+        } => {
+            draw_input_value(frame, area, field, operator, value);
+        }
+    }
+}
+
+fn draw_filter_list(
+    frame: &mut Frame,
+    area: Rect,
+    popup: &super::LogFilterPopup,
+    selected: usize,
+) {
+    let highlight = Style::default().bg(Color::DarkGray).fg(Color::White);
+    let section_style = Style::default()
+        .fg(Color::Cyan)
+        .add_modifier(Modifier::BOLD);
+    let normal = Style::default();
+
+    let mut lines: Vec<Line> = Vec::new();
+
+    // Severity
+    let sev_text = if let Some(ref sev) = popup.severity {
+        format!(" Severity: >= {}", sev.value)
+    } else {
+        " Severity: (not set)".to_string()
+    };
+    let sev_style = if selected == 0 { highlight } else { normal };
+    lines.push(Line::from(Span::styled(sev_text, sev_style)));
+    lines.push(Line::from(""));
+
+    // Attributes section
+    lines.push(Line::from(Span::styled(" Attributes", section_style)));
+    let na = popup.attribute_conditions.len();
+    for (i, cond) in popup.attribute_conditions.iter().enumerate() {
+        let text = format!(
+            "   {} {} {}",
+            cond.field,
+            operator_symbol(&cond.operator),
+            cond.value
+        );
+        let idx = 1 + i;
+        let style = if selected == idx { highlight } else { normal };
+        lines.push(Line::from(Span::styled(text, style)));
+    }
+    let add_attr_idx = 1 + na;
+    let add_attr_style = if selected == add_attr_idx {
+        highlight
+    } else {
+        Style::default().fg(Color::Green)
+    };
+    lines.push(Line::from(Span::styled("   [+] Add", add_attr_style)));
+    lines.push(Line::from(""));
+
+    // Resource Attributes section
+    lines.push(Line::from(Span::styled(
+        " Resource Attributes",
+        section_style,
+    )));
+    let nr = popup.resource_conditions.len();
+    for (i, cond) in popup.resource_conditions.iter().enumerate() {
+        let text = format!(
+            "   {} {} {}",
+            cond.field,
+            operator_symbol(&cond.operator),
+            cond.value
+        );
+        let idx = 2 + na + i;
+        let style = if selected == idx { highlight } else { normal };
+        lines.push(Line::from(Span::styled(text, style)));
+    }
+    let add_res_idx = 2 + na + nr;
+    let add_res_style = if selected == add_res_idx {
+        highlight
+    } else {
+        Style::default().fg(Color::Green)
+    };
+    lines.push(Line::from(Span::styled("   [+] Add", add_res_style)));
+    lines.push(Line::from(""));
+
+    // Apply button
+    let apply_idx = 3 + na + nr;
+    let apply_style = if selected == apply_idx {
+        Style::default()
+            .bg(Color::Yellow)
+            .fg(Color::Black)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::Yellow)
+    };
+    lines.push(Line::from(Span::styled("   [Apply]", apply_style)));
+    lines.push(Line::from(""));
+
+    // Help
+    lines.push(Line::from(Span::styled(
+        " \u{2191}\u{2193}:Navigate  Enter:Edit/Add  d:Del",
+        Style::default().fg(Color::DarkGray),
+    )));
+    lines.push(Line::from(Span::styled(
+        " Esc:Cancel",
+        Style::default().fg(Color::DarkGray),
+    )));
+
+    let height = (lines.len() as u16) + 2; // +2 for borders
+    let popup_area = centered_rect(50, height, area);
+
+    frame.render_widget(Clear, popup_area);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(" Log Filter ")
+        .border_style(Style::default().fg(Color::Yellow));
+    let text = Text::from(lines);
+    let paragraph = Paragraph::new(text).block(block);
+    frame.render_widget(paragraph, popup_area);
+}
+
+fn draw_select_severity(frame: &mut Frame, area: Rect, selected: usize) {
+    let highlight = Style::default().bg(Color::DarkGray).fg(Color::White);
+
+    let mut lines: Vec<Line> = Vec::new();
+    for (i, level) in SEVERITY_LEVELS.iter().enumerate() {
+        let style = if i == selected {
+            highlight
+        } else {
+            Style::default()
+        };
+        let prefix = if i == selected { "   \u{25B6} " } else { "     " };
+        lines.push(Line::from(Span::styled(
+            format!("{}{}", prefix, level),
+            style,
+        )));
+    }
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "  Enter:Select  Esc:Back",
+        Style::default().fg(Color::DarkGray),
+    )));
+
+    let height = (lines.len() as u16) + 2;
+    let popup_area = centered_rect(40, height, area);
+
+    frame.render_widget(Clear, popup_area);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(" Select Severity (>=) ")
+        .border_style(Style::default().fg(Color::Yellow));
+    let text = Text::from(lines);
+    let paragraph = Paragraph::new(text).block(block);
+    frame.render_widget(paragraph, popup_area);
+}
+
+fn draw_select_field(
+    frame: &mut Frame,
+    area: Rect,
+    candidates: &[String],
+    selected: usize,
+    input: &str,
+) {
+    let filtered: Vec<&String> = candidates
+        .iter()
+        .filter(|c| {
+            c.to_ascii_lowercase()
+                .contains(&input.to_ascii_lowercase())
+        })
+        .collect();
+
+    let highlight = Style::default().bg(Color::DarkGray).fg(Color::White);
+
+    let mut lines: Vec<Line> = Vec::new();
+    lines.push(Line::from(vec![
+        Span::styled("  > ", Style::default().fg(Color::Green)),
+        Span::styled(
+            format!("{}|", input),
+            Style::default().fg(Color::Yellow),
+        ),
+    ]));
+    lines.push(Line::from(""));
+
+    for (i, candidate) in filtered.iter().enumerate() {
+        let style = if i == selected { highlight } else { Style::default() };
+        let prefix = if i == selected { "   \u{25B6} " } else { "     " };
+        lines.push(Line::from(Span::styled(
+            format!("{}{}", prefix, candidate),
+            style,
+        )));
+    }
+
+    if filtered.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "     (no matches - input will be used)",
+            Style::default().fg(Color::DarkGray),
+        )));
+    }
+
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "  \u{2191}\u{2193}:Navigate  Enter:Select  Esc:Back",
+        Style::default().fg(Color::DarkGray),
+    )));
+
+    let height = (lines.len() as u16 + 2).min(area.height);
+    let popup_area = centered_rect(50, height, area);
+
+    frame.render_widget(Clear, popup_area);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(" Select Field ")
+        .border_style(Style::default().fg(Color::Yellow));
+    let text = Text::from(lines);
+    let paragraph = Paragraph::new(text).block(block);
+    frame.render_widget(paragraph, popup_area);
+}
+
+fn draw_select_operator(frame: &mut Frame, area: Rect, field: &str, selected: usize) {
+    let highlight = Style::default().bg(Color::DarkGray).fg(Color::White);
+
+    let mut lines: Vec<Line> = Vec::new();
+    lines.push(Line::from(vec![
+        Span::styled("  Field: ", Style::default().fg(Color::DarkGray)),
+        Span::raw(field.to_string()),
+    ]));
+    lines.push(Line::from(""));
+
+    for (i, op) in ALL_OPERATORS.iter().enumerate() {
+        let style = if i == selected {
+            highlight
+        } else {
+            Style::default()
+        };
+        let prefix = if i == selected { "   \u{25B6} " } else { "     " };
+        let text = format!(
+            "{}{:<4} ({})",
+            prefix,
+            operator_symbol(op),
+            operator_label(op)
+        );
+        lines.push(Line::from(Span::styled(text, style)));
+    }
+
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "  Enter:Select  Esc:Back",
+        Style::default().fg(Color::DarkGray),
+    )));
+
+    let height = (lines.len() as u16) + 2;
+    let popup_area = centered_rect(50, height, area);
+
+    frame.render_widget(Clear, popup_area);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(" Select Operator ")
+        .border_style(Style::default().fg(Color::Yellow));
+    let text = Text::from(lines);
+    let paragraph = Paragraph::new(text).block(block);
+    frame.render_widget(paragraph, popup_area);
+}
+
+fn draw_input_value(
+    frame: &mut Frame,
+    area: Rect,
+    field: &str,
+    operator: &super::FilterOperator,
+    value: &str,
+) {
+    let popup_area = centered_rect(50, 9, area);
+    frame.render_widget(Clear, popup_area);
+
+    let lines = vec![
+        Line::from(vec![
+            Span::styled("  Field: ", Style::default().fg(Color::DarkGray)),
+            Span::raw(field.to_string()),
+        ]),
+        Line::from(vec![
+            Span::styled("  Operator: ", Style::default().fg(Color::DarkGray)),
+            Span::raw(format!(
+                "{} ({})",
+                operator_symbol(operator),
+                operator_label(operator)
+            )),
+        ]),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("  Value: ", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                format!("{}|", value),
+                Style::default().fg(Color::Yellow),
+            ),
+        ]),
+        Line::from(""),
+        Line::from(Span::styled(
+            "  Enter:Add  Esc:Back",
+            Style::default().fg(Color::DarkGray),
+        )),
+    ];
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(" Enter Value ")
+        .border_style(Style::default().fg(Color::Yellow));
+    let text = Text::from(lines);
+    let paragraph = Paragraph::new(text).block(block);
+    frame.render_widget(paragraph, popup_area);
 }

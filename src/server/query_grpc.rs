@@ -5,7 +5,10 @@ use crate::proto::otelcli::query::v1::{
     ClearResponse, ClearTracesRequest, QueryLogsRequest, QueryLogsResponse, QueryMetricsRequest,
     QueryMetricsResponse, QueryTracesRequest, QueryTracesResponse,
 };
-use crate::store::{LogFilter, MetricFilter, SharedStore, TraceFilter};
+use crate::store::{
+    FilterCondition, FilterOperator, LogFilter, MetricFilter, SeverityCondition, SharedStore,
+    TraceFilter,
+};
 
 pub struct QueryGrpcService {
     store: SharedStore,
@@ -54,11 +57,20 @@ impl QueryServiceTrait for QueryGrpcService {
         request: Request<QueryLogsRequest>,
     ) -> Result<Response<QueryLogsResponse>, Status> {
         let req = request.into_inner();
-        let filter = LogFilter {
-            service_name: non_empty(&req.service_name),
-            severity: non_empty(&req.severity),
-            attributes: req.attributes.into_iter().collect(),
-        };
+        let mut filter = LogFilter::default();
+        if let Some(sev) = non_empty(&req.severity) {
+            filter.severity = Some(SeverityCondition {
+                operator: FilterOperator::Eq,
+                value: sev,
+            });
+        }
+        for (k, v) in req.attributes {
+            filter.attribute_conditions.push(FilterCondition {
+                field: k,
+                operator: FilterOperator::Eq,
+                value: v,
+            });
+        }
         let limit = effective_limit(req.limit);
         let store = self.store.read().await;
         let resource_logs = store.query_logs(&filter, limit);

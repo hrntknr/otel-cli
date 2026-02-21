@@ -132,6 +132,7 @@ async fn test_query_logs_with_severity_filter() {
                         scope: None,
                         log_records: vec![LogRecord {
                             severity_text: "ERROR".into(),
+                            severity_number: 17,
                             ..Default::default()
                         }],
                         schema_url: String::new(),
@@ -144,6 +145,7 @@ async fn test_query_logs_with_severity_filter() {
                         scope: None,
                         log_records: vec![LogRecord {
                             severity_text: "INFO".into(),
+                            severity_number: 9,
                             ..Default::default()
                         }],
                         schema_url: String::new(),

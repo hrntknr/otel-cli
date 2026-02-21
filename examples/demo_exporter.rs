@@ -95,18 +95,15 @@ struct SpanDef {
     attributes: Vec<KeyValue>,
 }
 
-fn generate_traces(rng: &mut impl Rng) -> Vec<ResourceSpans> {
-    let trace_id: Vec<u8> = (0..16).map(|_| rng.random()).collect();
-    let span_ids: Vec<Vec<u8>> = (0..3).map(|_| (0..8).map(|_| rng.random()).collect()).collect();
-    let base_time = now_nanos();
-
-    let defs = [
+fn trace_defs_get_users() -> Vec<SpanDef> {
+    vec![
+        // 0: root
         SpanDef {
             service: "frontend",
             name: "HTTP GET /users",
             kind: SpanKind::Server as i32,
             offset_ms: 0,
-            duration_ms: 120,
+            duration_ms: 150,
             parent_idx: None,
             attributes: vec![
                 kv("http.method", str_val("GET")),
@@ -114,31 +111,185 @@ fn generate_traces(rng: &mut impl Rng) -> Vec<ResourceSpans> {
                 kv("http.status_code", int_val(200)),
             ],
         },
+        // 1: gateway
         SpanDef {
             service: "api-gateway",
             name: "route /users",
             kind: SpanKind::Internal as i32,
-            offset_ms: 5,
-            duration_ms: 100,
+            offset_ms: 3,
+            duration_ms: 140,
             parent_idx: Some(0),
             attributes: vec![
                 kv("rpc.system", str_val("grpc")),
                 kv("rpc.service", str_val("UserService")),
             ],
         },
+        // 2: auth (parallel with user-service)
+        SpanDef {
+            service: "auth-service",
+            name: "verify JWT",
+            kind: SpanKind::Internal as i32,
+            offset_ms: 6,
+            duration_ms: 15,
+            parent_idx: Some(1),
+            attributes: vec![kv("auth.method", str_val("jwt"))],
+        },
+        // 3: user-service (starts after auth)
+        SpanDef {
+            service: "user-service",
+            name: "list users",
+            kind: SpanKind::Server as i32,
+            offset_ms: 25,
+            duration_ms: 110,
+            parent_idx: Some(1),
+            attributes: vec![kv("rpc.method", str_val("ListUsers"))],
+        },
+        // 4: cache lookup
+        SpanDef {
+            service: "user-service",
+            name: "Redis GET users:list",
+            kind: SpanKind::Client as i32,
+            offset_ms: 28,
+            duration_ms: 8,
+            parent_idx: Some(3),
+            attributes: vec![
+                kv("db.system", str_val("redis")),
+                kv("db.operation", str_val("GET")),
+                kv("cache.hit", str_val("false")),
+            ],
+        },
+        // 5: db query (after cache miss)
         SpanDef {
             service: "user-service",
             name: "SELECT users",
             kind: SpanKind::Client as i32,
-            offset_ms: 15,
-            duration_ms: 60,
-            parent_idx: Some(1),
+            offset_ms: 40,
+            duration_ms: 85,
+            parent_idx: Some(3),
             attributes: vec![
                 kv("db.system", str_val("postgresql")),
                 kv("db.statement", str_val("SELECT * FROM users LIMIT 100")),
             ],
         },
-    ];
+    ]
+}
+
+fn trace_defs_post_order() -> Vec<SpanDef> {
+    vec![
+        // 0: root
+        SpanDef {
+            service: "frontend",
+            name: "HTTP POST /orders",
+            kind: SpanKind::Server as i32,
+            offset_ms: 0,
+            duration_ms: 250,
+            parent_idx: None,
+            attributes: vec![
+                kv("http.method", str_val("POST")),
+                kv("http.route", str_val("/orders")),
+                kv("http.status_code", int_val(201)),
+            ],
+        },
+        // 1: gateway
+        SpanDef {
+            service: "api-gateway",
+            name: "route /orders",
+            kind: SpanKind::Internal as i32,
+            offset_ms: 3,
+            duration_ms: 240,
+            parent_idx: Some(0),
+            attributes: vec![
+                kv("rpc.system", str_val("grpc")),
+                kv("rpc.service", str_val("OrderService")),
+            ],
+        },
+        // 2: auth
+        SpanDef {
+            service: "auth-service",
+            name: "verify JWT",
+            kind: SpanKind::Internal as i32,
+            offset_ms: 6,
+            duration_ms: 12,
+            parent_idx: Some(1),
+            attributes: vec![kv("auth.method", str_val("jwt"))],
+        },
+        // 3: order-service
+        SpanDef {
+            service: "order-service",
+            name: "create order",
+            kind: SpanKind::Server as i32,
+            offset_ms: 22,
+            duration_ms: 215,
+            parent_idx: Some(1),
+            attributes: vec![kv("rpc.method", str_val("CreateOrder"))],
+        },
+        // 4: inventory check (parallel with payment)
+        SpanDef {
+            service: "inventory-service",
+            name: "reserve stock",
+            kind: SpanKind::Client as i32,
+            offset_ms: 26,
+            duration_ms: 45,
+            parent_idx: Some(3),
+            attributes: vec![
+                kv("inventory.sku", str_val("ITEM-1234")),
+                kv("inventory.quantity", int_val(1)),
+            ],
+        },
+        // 5: payment (parallel with inventory)
+        SpanDef {
+            service: "payment-service",
+            name: "process payment",
+            kind: SpanKind::Client as i32,
+            offset_ms: 26,
+            duration_ms: 120,
+            parent_idx: Some(3),
+            attributes: vec![
+                kv("payment.method", str_val("credit_card")),
+                kv("payment.currency", str_val("USD")),
+            ],
+        },
+        // 6: db insert (after inventory + payment)
+        SpanDef {
+            service: "order-service",
+            name: "INSERT orders",
+            kind: SpanKind::Client as i32,
+            offset_ms: 150,
+            duration_ms: 30,
+            parent_idx: Some(3),
+            attributes: vec![
+                kv("db.system", str_val("postgresql")),
+                kv("db.statement", str_val("INSERT INTO orders (...) VALUES (...)")),
+            ],
+        },
+        // 7: send confirmation event
+        SpanDef {
+            service: "order-service",
+            name: "publish order.created",
+            kind: SpanKind::Producer as i32,
+            offset_ms: 185,
+            duration_ms: 18,
+            parent_idx: Some(3),
+            attributes: vec![
+                kv("messaging.system", str_val("kafka")),
+                kv("messaging.destination", str_val("order.events")),
+            ],
+        },
+    ]
+}
+
+fn generate_traces(rng: &mut impl Rng) -> Vec<ResourceSpans> {
+    let trace_id: Vec<u8> = (0..16).map(|_| rng.random()).collect();
+    let base_time = now_nanos();
+
+    let defs = if rng.random_bool(0.5) {
+        trace_defs_get_users()
+    } else {
+        trace_defs_post_order()
+    };
+    let span_ids: Vec<Vec<u8>> = (0..defs.len())
+        .map(|_| (0..8).map(|_| rng.random()).collect())
+        .collect();
 
     // Group spans by service → ResourceSpans
     let mut result: Vec<ResourceSpans> = Vec::new();
@@ -184,6 +335,21 @@ struct LogDef {
     service: &'static str,
     severity: SeverityNumber,
     body: &'static str,
+    attributes: &'static [(&'static str, LogAttrVal)],
+}
+
+enum LogAttrVal {
+    Str(&'static str),
+    Int(i64),
+}
+
+fn log_attrs(defs: &[(&str, LogAttrVal)]) -> Vec<KeyValue> {
+    defs.iter()
+        .map(|(k, v)| match v {
+            LogAttrVal::Str(s) => kv(k, str_val(s)),
+            LogAttrVal::Int(n) => kv(k, int_val(*n)),
+        })
+        .collect()
 }
 
 const LOG_TEMPLATES: &[LogDef] = &[
@@ -191,41 +357,84 @@ const LOG_TEMPLATES: &[LogDef] = &[
         service: "frontend",
         severity: SeverityNumber::Info,
         body: "Request completed successfully",
+        attributes: &[
+            ("http.method", LogAttrVal::Str("GET")),
+            ("http.route", LogAttrVal::Str("/users")),
+            ("http.status_code", LogAttrVal::Int(200)),
+            ("http.duration_ms", LogAttrVal::Int(142)),
+        ],
     },
     LogDef {
         service: "frontend",
         severity: SeverityNumber::Info,
         body: "Serving static assets from cache",
+        attributes: &[
+            ("http.route", LogAttrVal::Str("/static/app.js")),
+            ("cache.hit", LogAttrVal::Str("true")),
+        ],
     },
     LogDef {
         service: "api-gateway",
         severity: SeverityNumber::Warn,
         body: "Connection pool nearing capacity (85%)",
+        attributes: &[
+            ("pool.active", LogAttrVal::Int(85)),
+            ("pool.max", LogAttrVal::Int(100)),
+            ("pool.name", LogAttrVal::Str("upstream-users")),
+        ],
     },
     LogDef {
         service: "api-gateway",
         severity: SeverityNumber::Info,
         body: "Rate limiter reset for client 10.0.0.5",
+        attributes: &[
+            ("client.address", LogAttrVal::Str("10.0.0.5")),
+            ("rate_limit.bucket", LogAttrVal::Str("default")),
+            ("rate_limit.remaining", LogAttrVal::Int(100)),
+        ],
     },
     LogDef {
         service: "user-service",
         severity: SeverityNumber::Error,
         body: "Database query timeout after 5000ms",
+        attributes: &[
+            ("db.system", LogAttrVal::Str("postgresql")),
+            ("db.statement", LogAttrVal::Str("SELECT * FROM users WHERE active = true")),
+            ("db.duration_ms", LogAttrVal::Int(5000)),
+            ("error.type", LogAttrVal::Str("TimeoutException")),
+        ],
     },
     LogDef {
         service: "user-service",
         severity: SeverityNumber::Info,
         body: "Cache hit for user profile id=42",
+        attributes: &[
+            ("cache.hit", LogAttrVal::Str("true")),
+            ("cache.key", LogAttrVal::Str("user:42")),
+            ("user.id", LogAttrVal::Int(42)),
+        ],
     },
     LogDef {
         service: "user-service",
         severity: SeverityNumber::Warn,
         body: "Slow query detected: SELECT users (>200ms)",
+        attributes: &[
+            ("db.system", LogAttrVal::Str("postgresql")),
+            ("db.statement", LogAttrVal::Str("SELECT * FROM users ORDER BY created_at DESC")),
+            ("db.duration_ms", LogAttrVal::Int(312)),
+        ],
     },
     LogDef {
         service: "frontend",
         severity: SeverityNumber::Error,
         body: "Upstream service returned 503",
+        attributes: &[
+            ("http.method", LogAttrVal::Str("GET")),
+            ("http.route", LogAttrVal::Str("/api/orders")),
+            ("http.status_code", LogAttrVal::Int(503)),
+            ("upstream.service", LogAttrVal::Str("order-service")),
+            ("retry.attempt", LogAttrVal::Int(3)),
+        ],
     },
 ];
 
@@ -254,7 +463,7 @@ fn generate_logs(rng: &mut impl Rng) -> Vec<ResourceLogs> {
             severity_number: def.severity as i32,
             severity_text: severity_text(def.severity).into(),
             body: str_val(def.body),
-            attributes: vec![],
+            attributes: log_attrs(def.attributes),
             dropped_attributes_count: 0,
             flags: 0,
             trace_id: vec![],

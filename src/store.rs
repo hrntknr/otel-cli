@@ -36,11 +36,37 @@ pub struct TraceFilter {
     pub attributes: Vec<(String, String)>,
 }
 
-#[derive(Default)]
+#[derive(Clone, Default, Debug, PartialEq, Eq)]
+pub enum FilterOperator {
+    #[default]
+    Eq,
+    Contains,
+    NotEq,
+    NotContains,
+    Ge,
+    Gt,
+    Le,
+    Lt,
+}
+
+#[derive(Clone, Debug)]
+pub struct FilterCondition {
+    pub field: String,
+    pub operator: FilterOperator,
+    pub value: String,
+}
+
+#[derive(Clone, Debug)]
+pub struct SeverityCondition {
+    pub operator: FilterOperator,
+    pub value: String,
+}
+
+#[derive(Default, Clone, Debug)]
 pub struct LogFilter {
-    pub service_name: Option<String>,
-    pub severity: Option<String>,
-    pub attributes: Vec<(String, String)>,
+    pub severity: Option<SeverityCondition>,
+    pub attribute_conditions: Vec<FilterCondition>,
+    pub resource_conditions: Vec<FilterCondition>,
 }
 
 #[derive(Default)]
@@ -139,6 +165,63 @@ fn get_attribute_string(attributes: &[KeyValue], key: &str) -> Option<String> {
             Some(any_value::Value::StringValue(s)) => Some(s.clone()),
             _ => None,
         })
+}
+
+pub fn severity_text_to_number(text: &str) -> Option<i32> {
+    match text.to_ascii_uppercase().as_str() {
+        "TRACE" => Some(1),
+        "DEBUG" => Some(5),
+        "INFO" => Some(9),
+        "WARN" | "WARNING" => Some(13),
+        "ERROR" => Some(17),
+        "FATAL" => Some(21),
+        _ => text.parse::<i32>().ok(),
+    }
+}
+
+fn matches_operator(value: &str, operator: &FilterOperator, pattern: &str) -> bool {
+    let (v, p) = (value.to_ascii_lowercase(), pattern.to_ascii_lowercase());
+    match operator {
+        FilterOperator::Eq => v == p,
+        FilterOperator::Contains => v.contains(&p),
+        FilterOperator::NotEq => v != p,
+        FilterOperator::NotContains => !v.contains(&p),
+        FilterOperator::Ge | FilterOperator::Gt | FilterOperator::Le | FilterOperator::Lt => {
+            if let (Ok(vn), Ok(pn)) = (v.parse::<f64>(), p.parse::<f64>()) {
+                match operator {
+                    FilterOperator::Ge => vn >= pn,
+                    FilterOperator::Gt => vn > pn,
+                    FilterOperator::Le => vn <= pn,
+                    FilterOperator::Lt => vn < pn,
+                    _ => unreachable!(),
+                }
+            } else {
+                match operator {
+                    FilterOperator::Ge => v >= p,
+                    FilterOperator::Gt => v > p,
+                    FilterOperator::Le => v <= p,
+                    FilterOperator::Lt => v < p,
+                    _ => unreachable!(),
+                }
+            }
+        }
+    }
+}
+
+fn matches_severity(severity_number: i32, condition: &SeverityCondition) -> bool {
+    let Some(threshold) = severity_text_to_number(&condition.value) else {
+        return false;
+    };
+    let actual = severity_number;
+    match condition.operator {
+        FilterOperator::Eq => actual == threshold,
+        FilterOperator::NotEq => actual != threshold,
+        FilterOperator::Ge => actual >= threshold,
+        FilterOperator::Gt => actual > threshold,
+        FilterOperator::Le => actual <= threshold,
+        FilterOperator::Lt => actual < threshold,
+        _ => false,
+    }
 }
 
 impl Store {
@@ -277,40 +360,46 @@ impl Store {
             .iter()
             .rev()
             .filter(|rl| {
-                if let Some(ref service_name) = filter.service_name {
-                    let resource_attrs = rl
-                        .resource
-                        .as_ref()
-                        .map(|r| r.attributes.as_slice())
+                let resource_attrs = rl
+                    .resource
+                    .as_ref()
+                    .map(|r| r.attributes.as_slice())
+                    .unwrap_or_default();
+
+                // Resource conditions
+                for cond in &filter.resource_conditions {
+                    let val = get_attribute_string(resource_attrs, &cond.field)
                         .unwrap_or_default();
-                    if get_attribute_string(resource_attrs, "service.name").as_deref()
-                        != Some(service_name.as_str())
-                    {
+                    if !matches_operator(&val, &cond.operator, &cond.value) {
                         return false;
                     }
                 }
 
-                if let Some(ref severity) = filter.severity {
-                    let has_matching_severity = rl.scope_logs.iter().any(|sl| {
-                        sl.log_records
-                            .iter()
-                            .any(|lr| lr.severity_text.eq_ignore_ascii_case(severity))
-                    });
-                    if !has_matching_severity {
-                        return false;
-                    }
-                }
+                // Severity and attribute conditions apply per log record
+                let has_matching_record = rl.scope_logs.iter().any(|sl| {
+                    sl.log_records.iter().any(|lr| {
+                        // Severity
+                        if let Some(ref sev) = filter.severity {
+                            if !matches_severity(lr.severity_number, sev) {
+                                return false;
+                            }
+                        }
 
-                if !filter.attributes.is_empty() {
-                    let has_matching_attrs = rl.scope_logs.iter().any(|sl| {
-                        sl.log_records.iter().any(|lr| {
-                            filter.attributes.iter().all(|(key, value)| {
-                                get_attribute_string(&lr.attributes, key).as_deref()
-                                    == Some(value.as_str())
-                            })
-                        })
-                    });
-                    if !has_matching_attrs {
+                        // Attribute conditions
+                        for cond in &filter.attribute_conditions {
+                            let val = get_attribute_string(&lr.attributes, &cond.field)
+                                .unwrap_or_default();
+                            if !matches_operator(&val, &cond.operator, &cond.value) {
+                                return false;
+                            }
+                        }
+
+                        true
+                    })
+                });
+
+                if filter.severity.is_some() || !filter.attribute_conditions.is_empty() {
+                    if !has_matching_record {
                         return false;
                     }
                 }
@@ -459,6 +548,7 @@ mod tests {
         attrs: &[(&str, &str)],
         time_unix_nano: u64,
     ) -> ResourceLogs {
+        let severity_number = severity_text_to_number(severity).unwrap_or(0);
         let log_attrs: Vec<KeyValue> = attrs.iter().map(|(k, v)| make_kv(k, v)).collect();
         ResourceLogs {
             resource: make_resource(service_name),
@@ -467,7 +557,7 @@ mod tests {
                 log_records: vec![LogRecord {
                     time_unix_nano,
                     observed_time_unix_nano: 0,
-                    severity_number: 0,
+                    severity_number,
                     severity_text: severity.to_string(),
                     body: None,
                     attributes: log_attrs,
@@ -655,7 +745,11 @@ mod tests {
             make_resource_logs("frontend", "ERROR", &[]),
         ]);
         let filter = LogFilter {
-            service_name: Some("frontend".to_string()),
+            resource_conditions: vec![FilterCondition {
+                field: "service.name".into(),
+                operator: FilterOperator::Eq,
+                value: "frontend".into(),
+            }],
             ..Default::default()
         };
         assert_eq!(store.query_logs(&filter, 100).len(), 2);
@@ -671,9 +765,53 @@ mod tests {
             make_resource_logs("svc", "WARN", &[]),
         ]);
         let filter = LogFilter {
-            severity: Some("ERROR".to_string()),
+            severity: Some(SeverityCondition {
+                operator: FilterOperator::Eq,
+                value: "ERROR".into(),
+            }),
             ..Default::default()
         };
+        // severity_number for ERROR=17, error also maps to 17
+        assert_eq!(store.query_logs(&filter, 100).len(), 2);
+    }
+
+    #[test]
+    fn filter_logs_by_severity_ge() {
+        let (mut store, _rx) = Store::new(100);
+        store.insert_logs(vec![
+            make_resource_logs("svc", "DEBUG", &[]),  // 5
+            make_resource_logs("svc", "INFO", &[]),   // 9
+            make_resource_logs("svc", "WARN", &[]),   // 13
+            make_resource_logs("svc", "ERROR", &[]),  // 17
+        ]);
+        let filter = LogFilter {
+            severity: Some(SeverityCondition {
+                operator: FilterOperator::Ge,
+                value: "WARN".into(),
+            }),
+            ..Default::default()
+        };
+        // WARN(13) and ERROR(17) match >= WARN(13)
+        assert_eq!(store.query_logs(&filter, 100).len(), 2);
+    }
+
+    #[test]
+    fn filter_logs_by_severity_lt() {
+        let (mut store, _rx) = Store::new(100);
+        store.insert_logs(vec![
+            make_resource_logs("svc", "DEBUG", &[]),  // 5
+            make_resource_logs("svc", "INFO", &[]),   // 9
+            make_resource_logs("svc", "WARN", &[]),   // 13
+            make_resource_logs("svc", "ERROR", &[]),  // 17
+        ]);
+        let filter = LogFilter {
+            severity: Some(SeverityCondition {
+                operator: FilterOperator::Lt,
+                value: "WARN".into(),
+            }),
+            ..Default::default()
+        };
+        // DEBUG(5) and INFO(9) match < WARN(13)
         assert_eq!(store.query_logs(&filter, 100).len(), 2);
     }
 
@@ -686,10 +824,57 @@ mod tests {
             make_resource_logs("svc", "INFO", &[("env", "prod"), ("region", "us")]),
         ]);
         let filter = LogFilter {
-            attributes: vec![("env".to_string(), "prod".to_string())],
+            attribute_conditions: vec![FilterCondition {
+                field: "env".into(),
+                operator: FilterOperator::Eq,
+                value: "prod".into(),
+            }],
             ..Default::default()
         };
         assert_eq!(store.query_logs(&filter, 100).len(), 2);
+    }
+
+    #[test]
+    fn filter_logs_by_attributes_contains() {
+        let (mut store, _rx) = Store::new(100);
+        store.insert_logs(vec![
+            make_resource_logs("svc", "INFO", &[("url", "/api/users")]),
+            make_resource_logs("svc", "INFO", &[("url", "/api/orders")]),
+            make_resource_logs("svc", "INFO", &[("url", "/health")]),
+        ]);
+        let filter = LogFilter {
+            attribute_conditions: vec![FilterCondition {
+                field: "url".into(),
+                operator: FilterOperator::Contains,
+                value: "/api".into(),
+            }],
+            ..Default::default()
+        };
+        assert_eq!(store.query_logs(&filter, 100).len(), 2);
+    }
+
+    #[test]
+    fn filter_logs_combined_severity_and_resource() {
+        let (mut store, _rx) = Store::new(100);
+        store.insert_logs(vec![
+            make_resource_logs("frontend", "INFO", &[]),
+            make_resource_logs("frontend", "ERROR", &[]),
+            make_resource_logs("backend", "ERROR", &[]),
+            make_resource_logs("backend", "INFO", &[]),
+        ]);
+        let filter = LogFilter {
+            severity: Some(SeverityCondition {
+                operator: FilterOperator::Ge,
+                value: "ERROR".into(),
+            }),
+            resource_conditions: vec![FilterCondition {
+                field: "service.name".into(),
+                operator: FilterOperator::Eq,
+                value: "frontend".into(),
+            }],
+            ..Default::default()
+        };
+        assert_eq!(store.query_logs(&filter, 100).len(), 1);
     }
 
     #[test]
