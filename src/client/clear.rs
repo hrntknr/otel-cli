@@ -1,12 +1,7 @@
 use crate::proto::otelcli::query::v1::query_service_client::QueryServiceClient;
 use crate::proto::otelcli::query::v1::{ClearLogsRequest, ClearMetricsRequest, ClearTracesRequest};
 
-pub async fn clear(
-    server: &str,
-    traces: bool,
-    logs: bool,
-    metrics: bool,
-) -> anyhow::Result<()> {
+pub async fn clear(server: &str, traces: bool, logs: bool, metrics: bool) -> anyhow::Result<()> {
     let mut client = QueryServiceClient::connect(server.to_string()).await?;
 
     if traces {

@@ -12,7 +12,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(3), // Tab bar
-            Constraint::Min(0),   // Content area
+            Constraint::Min(0),    // Content area
             Constraint::Length(1), // Status bar
         ])
         .split(frame.area());
@@ -87,8 +87,14 @@ fn severity_color(severity: &str) -> Color {
 }
 
 fn draw_traces_list(frame: &mut Frame, area: Rect, app: &mut App) {
-    let header = Row::new(vec!["Trace ID", "Service", "Root Span", "Spans", "Duration"])
-        .style(Style::default().bold());
+    let header = Row::new(vec![
+        "Trace ID",
+        "Service",
+        "Root Span",
+        "Spans",
+        "Duration",
+    ])
+    .style(Style::default().bold());
 
     let rows: Vec<Row> = app
         .trace_summaries
@@ -144,16 +150,30 @@ fn draw_traces_timeline(frame: &mut Frame, area: Rect, app: &mut App) {
         return;
     }
 
-    let trace_min = app.timeline_spans.iter().map(|s| s.start_ns).min().unwrap_or(0);
-    let trace_max = app.timeline_spans.iter().map(|s| s.end_ns).max().unwrap_or(0);
+    let trace_min = app
+        .timeline_spans
+        .iter()
+        .map(|s| s.start_ns)
+        .min()
+        .unwrap_or(0);
+    let trace_max = app
+        .timeline_spans
+        .iter()
+        .map(|s| s.end_ns)
+        .max()
+        .unwrap_or(0);
     let trace_range = trace_max.saturating_sub(trace_min).max(1) as f64;
 
     // Assign colors to services
-    let mut service_colors: std::collections::HashMap<&str, Color> = std::collections::HashMap::new();
+    let mut service_colors: std::collections::HashMap<&str, Color> =
+        std::collections::HashMap::new();
     let mut color_idx = 0;
     for span in &app.timeline_spans {
         if !service_colors.contains_key(span.service_name.as_str()) {
-            service_colors.insert(&span.service_name, SERVICE_COLORS[color_idx % SERVICE_COLORS.len()]);
+            service_colors.insert(
+                &span.service_name,
+                SERVICE_COLORS[color_idx % SERVICE_COLORS.len()],
+            );
             color_idx += 1;
         }
     }
@@ -161,8 +181,8 @@ fn draw_traces_timeline(frame: &mut Frame, area: Rect, app: &mut App) {
     // Calculate waterfall bar width (area minus borders, other columns, and spacing)
     let waterfall_width = area.width.saturating_sub(2 + 40 + 15 + 12 + 6) as usize;
 
-    let header = Row::new(vec!["Span", "Service", "Duration", "Waterfall"])
-        .style(Style::default().bold());
+    let header =
+        Row::new(vec!["Span", "Service", "Duration", "Waterfall"]).style(Style::default().bold());
 
     let rows: Vec<Row> = app
         .timeline_spans
@@ -175,23 +195,24 @@ fn draw_traces_timeline(frame: &mut Frame, area: Rect, app: &mut App) {
             let color = if s.status_code == 2 {
                 Color::Red
             } else {
-                service_colors.get(s.service_name.as_str()).copied().unwrap_or(Color::White)
+                service_colors
+                    .get(s.service_name.as_str())
+                    .copied()
+                    .unwrap_or(Color::White)
             };
 
             // Build waterfall bar
             let bar = if waterfall_width > 0 {
-                let start_offset =
-                    ((s.start_ns.saturating_sub(trace_min)) as f64 / trace_range * waterfall_width as f64) as usize;
+                let start_offset = ((s.start_ns.saturating_sub(trace_min)) as f64 / trace_range
+                    * waterfall_width as f64) as usize;
                 let bar_len = ((s.end_ns.saturating_sub(s.start_ns)) as f64 / trace_range
                     * waterfall_width as f64)
                     .ceil() as usize;
-                let bar_len = bar_len.max(1).min(waterfall_width.saturating_sub(start_offset));
+                let bar_len = bar_len
+                    .max(1)
+                    .min(waterfall_width.saturating_sub(start_offset));
                 let start_offset = start_offset.min(waterfall_width.saturating_sub(1));
-                format!(
-                    "{}{}",
-                    " ".repeat(start_offset),
-                    "\u{2588}".repeat(bar_len)
-                )
+                format!("{}{}", " ".repeat(start_offset), "\u{2588}".repeat(bar_len))
             } else {
                 String::new()
             };
@@ -244,8 +265,7 @@ fn log_row_cells(l: &LogRow) -> Vec<Cell<'static>> {
 }
 
 fn draw_logs_table_basic(frame: &mut Frame, area: Rect, app: &mut App) {
-    let header = Row::new(vec!["Timestamp", "Severity", "Body"])
-        .style(Style::default().bold());
+    let header = Row::new(vec!["Timestamp", "Severity", "Body"]).style(Style::default().bold());
 
     let rows: Vec<Row> = app
         .logs_data
@@ -382,8 +402,7 @@ fn build_detail_lines(log: &LogRow) -> Vec<Line<'static>> {
 }
 
 fn draw_metrics_table(frame: &mut Frame, area: Rect, app: &mut App) {
-    let header = Row::new(vec!["Name", "Type", "Points", "Service"])
-        .style(Style::default().bold());
+    let header = Row::new(vec!["Name", "Type", "Points", "Service"]).style(Style::default().bold());
 
     let rows: Vec<Row> = app
         .metrics_data
@@ -632,12 +651,7 @@ fn draw_filter_popup(frame: &mut Frame, area: Rect, app: &App) {
     }
 }
 
-fn draw_filter_list(
-    frame: &mut Frame,
-    area: Rect,
-    popup: &super::LogFilterPopup,
-    selected: usize,
-) {
+fn draw_filter_list(frame: &mut Frame, area: Rect, popup: &super::LogFilterPopup, selected: usize) {
     let highlight = Style::default().bg(Color::DarkGray).fg(Color::White);
     let section_style = Style::default()
         .fg(Color::Cyan)
@@ -753,7 +767,11 @@ fn draw_select_severity(frame: &mut Frame, area: Rect, selected: usize) {
         } else {
             Style::default()
         };
-        let prefix = if i == selected { "   \u{25B6} " } else { "     " };
+        let prefix = if i == selected {
+            "   \u{25B6} "
+        } else {
+            "     "
+        };
         lines.push(Line::from(Span::styled(
             format!("{}{}", prefix, level),
             style,
@@ -787,10 +805,7 @@ fn draw_select_field(
 ) {
     let filtered: Vec<&String> = candidates
         .iter()
-        .filter(|c| {
-            c.to_ascii_lowercase()
-                .contains(&input.to_ascii_lowercase())
-        })
+        .filter(|c| c.to_ascii_lowercase().contains(&input.to_ascii_lowercase()))
         .collect();
 
     let highlight = Style::default().bg(Color::DarkGray).fg(Color::White);
@@ -798,16 +813,21 @@ fn draw_select_field(
     let mut lines: Vec<Line> = Vec::new();
     lines.push(Line::from(vec![
         Span::styled("  > ", Style::default().fg(Color::Green)),
-        Span::styled(
-            format!("{}|", input),
-            Style::default().fg(Color::Yellow),
-        ),
+        Span::styled(format!("{}|", input), Style::default().fg(Color::Yellow)),
     ]));
     lines.push(Line::from(""));
 
     for (i, candidate) in filtered.iter().enumerate() {
-        let style = if i == selected { highlight } else { Style::default() };
-        let prefix = if i == selected { "   \u{25B6} " } else { "     " };
+        let style = if i == selected {
+            highlight
+        } else {
+            Style::default()
+        };
+        let prefix = if i == selected {
+            "   \u{25B6} "
+        } else {
+            "     "
+        };
         lines.push(Line::from(Span::styled(
             format!("{}{}", prefix, candidate),
             style,
@@ -856,7 +876,11 @@ fn draw_select_operator(frame: &mut Frame, area: Rect, field: &str, selected: us
         } else {
             Style::default()
         };
-        let prefix = if i == selected { "   \u{25B6} " } else { "     " };
+        let prefix = if i == selected {
+            "   \u{25B6} "
+        } else {
+            "     "
+        };
         let text = format!(
             "{}{:<4} ({})",
             prefix,
@@ -911,10 +935,7 @@ fn draw_input_value(
         Line::from(""),
         Line::from(vec![
             Span::styled("  Value: ", Style::default().fg(Color::DarkGray)),
-            Span::styled(
-                format!("{}|", value),
-                Style::default().fg(Color::Yellow),
-            ),
+            Span::styled(format!("{}|", value), Style::default().fg(Color::Yellow)),
         ]),
         Line::from(""),
         Line::from(Span::styled(

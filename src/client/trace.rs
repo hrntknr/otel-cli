@@ -1,7 +1,7 @@
 use crate::cli::OutputFormat;
+use crate::proto::opentelemetry::proto::trace::v1::ResourceSpans;
 use crate::proto::otelcli::query::v1::query_service_client::QueryServiceClient;
 use crate::proto::otelcli::query::v1::QueryTracesRequest;
-use crate::proto::opentelemetry::proto::trace::v1::ResourceSpans;
 
 use super::{
     extract_any_value_string, format_attributes_json, format_timestamp, get_resource_attributes,
@@ -49,11 +49,7 @@ fn print_traces_text(resource_spans: &[ResourceSpans]) {
             for span in &ss.spans {
                 let trace_id = hex_encode(&span.trace_id);
                 let span_id = hex_encode(&span.span_id);
-                let status_code = span
-                    .status
-                    .as_ref()
-                    .map(|s| s.code)
-                    .unwrap_or(0);
+                let status_code = span.status.as_ref().map(|s| s.code).unwrap_or(0);
                 let duration = span
                     .end_time_unix_nano
                     .saturating_sub(span.start_time_unix_nano);
@@ -102,11 +98,7 @@ fn build_traces_value(resource_spans: &[ResourceSpans]) -> Vec<serde_json::Value
             for span in &ss.spans {
                 let trace_id = hex_encode(&span.trace_id);
                 let span_id = hex_encode(&span.span_id);
-                let status_code = span
-                    .status
-                    .as_ref()
-                    .map(|s| s.code)
-                    .unwrap_or(0);
+                let status_code = span.status.as_ref().map(|s| s.code).unwrap_or(0);
 
                 let entry = serde_json::json!({
                     "trace_id": trace_id,
@@ -134,6 +126,9 @@ fn print_traces_json(resource_spans: &[ResourceSpans]) -> anyhow::Result<()> {
 
 fn print_traces_toon(resource_spans: &[ResourceSpans]) -> anyhow::Result<()> {
     let traces = build_traces_value(resource_spans);
-    println!("{}", toon_format::encode_default(&serde_json::json!(traces))?);
+    println!(
+        "{}",
+        toon_format::encode_default(&serde_json::json!(traces))?
+    );
     Ok(())
 }

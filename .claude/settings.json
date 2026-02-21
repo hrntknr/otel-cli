@@ -1,0 +1,16 @@
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write|MultiEdit|NotebookEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "cargo fmt --quiet 2>/dev/null; exit 0",
+            "statusMessage": "Running cargo fmt..."
+          }
+        ]
+      }
+    ]
+  }
+}

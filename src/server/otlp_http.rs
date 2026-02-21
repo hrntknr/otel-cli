@@ -20,11 +20,7 @@ struct ProtobufResponse(Vec<u8>);
 
 impl IntoResponse for ProtobufResponse {
     fn into_response(self) -> axum::response::Response {
-        (
-            [(header::CONTENT_TYPE, "application/x-protobuf")],
-            self.0,
-        )
-            .into_response()
+        ([(header::CONTENT_TYPE, "application/x-protobuf")], self.0).into_response()
     }
 }
 
@@ -40,8 +36,7 @@ async fn handle_traces(
     State(store): State<SharedStore>,
     body: Bytes,
 ) -> Result<impl IntoResponse, StatusCode> {
-    let request =
-        ExportTraceServiceRequest::decode(body).map_err(|_| StatusCode::BAD_REQUEST)?;
+    let request = ExportTraceServiceRequest::decode(body).map_err(|_| StatusCode::BAD_REQUEST)?;
     let mut s = store.write().await;
     s.insert_traces(request.resource_spans);
     let response = ExportTraceServiceResponse {
@@ -54,8 +49,7 @@ async fn handle_logs(
     State(store): State<SharedStore>,
     body: Bytes,
 ) -> Result<impl IntoResponse, StatusCode> {
-    let request =
-        ExportLogsServiceRequest::decode(body).map_err(|_| StatusCode::BAD_REQUEST)?;
+    let request = ExportLogsServiceRequest::decode(body).map_err(|_| StatusCode::BAD_REQUEST)?;
     let mut s = store.write().await;
     s.insert_logs(request.resource_logs);
     let response = ExportLogsServiceResponse {
@@ -68,8 +62,7 @@ async fn handle_metrics(
     State(store): State<SharedStore>,
     body: Bytes,
 ) -> Result<impl IntoResponse, StatusCode> {
-    let request =
-        ExportMetricsServiceRequest::decode(body).map_err(|_| StatusCode::BAD_REQUEST)?;
+    let request = ExportMetricsServiceRequest::decode(body).map_err(|_| StatusCode::BAD_REQUEST)?;
     let mut s = store.write().await;
     s.insert_metrics(request.resource_metrics);
     let response = ExportMetricsServiceResponse {

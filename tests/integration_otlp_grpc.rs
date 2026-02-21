@@ -1,20 +1,12 @@
 use otel_cli::proto::opentelemetry::proto::{
     collector::{
-        logs::v1::{
-            logs_service_client::LogsServiceClient, ExportLogsServiceRequest,
-        },
-        metrics::v1::{
-            metrics_service_client::MetricsServiceClient, ExportMetricsServiceRequest,
-        },
-        trace::v1::{
-            trace_service_client::TraceServiceClient, ExportTraceServiceRequest,
-        },
+        logs::v1::{logs_service_client::LogsServiceClient, ExportLogsServiceRequest},
+        metrics::v1::{metrics_service_client::MetricsServiceClient, ExportMetricsServiceRequest},
+        trace::v1::{trace_service_client::TraceServiceClient, ExportTraceServiceRequest},
     },
     common::v1::{any_value, AnyValue, KeyValue},
     logs::v1::{LogRecord, ResourceLogs, ScopeLogs},
-    metrics::v1::{
-        metric, Gauge, NumberDataPoint, Metric, ResourceMetrics, ScopeMetrics,
-    },
+    metrics::v1::{metric, Gauge, Metric, NumberDataPoint, ResourceMetrics, ScopeMetrics},
     resource::v1::Resource,
     trace::v1::{ResourceSpans, ScopeSpans, Span},
 };
@@ -43,10 +35,7 @@ fn make_resource(service_name: &str) -> Option<Resource> {
     })
 }
 
-async fn start_servers(
-    grpc_port: u16,
-    query_port: u16,
-) -> (store::SharedStore, CancellationToken) {
+async fn start_servers(grpc_port: u16, query_port: u16) -> (store::SharedStore, CancellationToken) {
     let (shared_store, _rx) = store::new_shared(1000);
     let shutdown = CancellationToken::new();
 

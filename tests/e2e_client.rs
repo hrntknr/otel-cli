@@ -1,9 +1,7 @@
 use otel_cli::proto::opentelemetry::proto::{
     collector::{
         logs::v1::{logs_service_client::LogsServiceClient, ExportLogsServiceRequest},
-        metrics::v1::{
-            metrics_service_client::MetricsServiceClient, ExportMetricsServiceRequest,
-        },
+        metrics::v1::{metrics_service_client::MetricsServiceClient, ExportMetricsServiceRequest},
         trace::v1::{trace_service_client::TraceServiceClient, ExportTraceServiceRequest},
     },
     common::v1::{any_value, AnyValue, KeyValue},
@@ -37,10 +35,7 @@ fn make_resource(service_name: &str) -> Option<Resource> {
     })
 }
 
-async fn start_servers(
-    grpc_port: u16,
-    query_port: u16,
-) -> (store::SharedStore, CancellationToken) {
+async fn start_servers(grpc_port: u16, query_port: u16) -> (store::SharedStore, CancellationToken) {
     let (shared_store, _rx) = store::new_shared(1000);
     let shutdown = CancellationToken::new();
 
@@ -144,9 +139,7 @@ async fn test_e2e_log_query() {
                         time_unix_nano: 1_700_000_000_000_000_000,
                         severity_text: "WARN".into(),
                         body: Some(AnyValue {
-                            value: Some(any_value::Value::StringValue(
-                                "something happened".into(),
-                            )),
+                            value: Some(any_value::Value::StringValue("something happened".into())),
                         }),
                         attributes: vec![KeyValue {
                             key: "env".into(),
@@ -180,10 +173,7 @@ async fn test_e2e_log_query() {
 
     let logs = response.into_inner().resource_logs;
     assert!(!logs.is_empty(), "Expected non-empty log results");
-    assert_eq!(
-        logs[0].scope_logs[0].log_records[0].severity_text,
-        "WARN"
-    );
+    assert_eq!(logs[0].scope_logs[0].log_records[0].severity_text, "WARN");
 }
 
 #[tokio::test]
@@ -238,8 +228,5 @@ async fn test_e2e_metric_query() {
 
     let metrics = response.into_inner().resource_metrics;
     assert!(!metrics.is_empty(), "Expected non-empty metric results");
-    assert_eq!(
-        metrics[0].scope_metrics[0].metrics[0].name,
-        "request_count"
-    );
+    assert_eq!(metrics[0].scope_metrics[0].metrics[0].name, "request_count");
 }

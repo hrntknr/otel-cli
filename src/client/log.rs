@@ -1,7 +1,7 @@
 use crate::cli::OutputFormat;
+use crate::proto::opentelemetry::proto::logs::v1::ResourceLogs;
 use crate::proto::otelcli::query::v1::query_service_client::QueryServiceClient;
 use crate::proto::otelcli::query::v1::QueryLogsRequest;
-use crate::proto::opentelemetry::proto::logs::v1::ResourceLogs;
 
 use super::{
     extract_any_value_string, format_attributes_json, format_timestamp, get_resource_attributes,
@@ -51,9 +51,9 @@ pub fn parse_time_spec(s: &str) -> anyhow::Result<u64> {
     // Try RFC3339
     let dt = chrono::DateTime::parse_from_rfc3339(s_trimmed)
         .map_err(|e| anyhow::anyhow!("invalid time spec '{}': {}", s, e))?;
-    Ok(dt.timestamp_nanos_opt().ok_or_else(|| {
-        anyhow::anyhow!("timestamp out of range: {}", s)
-    })? as u64)
+    Ok(dt
+        .timestamp_nanos_opt()
+        .ok_or_else(|| anyhow::anyhow!("timestamp out of range: {}", s))? as u64)
 }
 
 pub async fn query_logs(

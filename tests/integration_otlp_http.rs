@@ -1,7 +1,6 @@
 use otel_cli::proto::opentelemetry::proto::{
     collector::{
-        logs::v1::ExportLogsServiceRequest,
-        metrics::v1::ExportMetricsServiceRequest,
+        logs::v1::ExportLogsServiceRequest, metrics::v1::ExportMetricsServiceRequest,
         trace::v1::ExportTraceServiceRequest,
     },
     common::v1::{any_value, AnyValue, KeyValue},
@@ -80,7 +79,12 @@ async fn test_http_trace_ingest() {
         .unwrap();
 
     assert_eq!(response.status(), 200);
-    let content_type = response.headers().get("content-type").unwrap().to_str().unwrap();
+    let content_type = response
+        .headers()
+        .get("content-type")
+        .unwrap()
+        .to_str()
+        .unwrap();
     assert_eq!(content_type, "application/x-protobuf");
 }
 

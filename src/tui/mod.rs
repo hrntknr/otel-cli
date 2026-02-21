@@ -5,9 +5,7 @@ pub mod ui;
 use std::io;
 
 use crossterm::{
-    event::{
-        DisableMouseCapture, EnableMouseCapture, KeyCode, KeyModifiers, MouseEventKind,
-    },
+    event::{DisableMouseCapture, EnableMouseCapture, KeyCode, KeyModifiers, MouseEventKind},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -564,16 +562,14 @@ impl App {
                             }
                             ListItem::AttributeCondition(i) => {
                                 popup.attribute_conditions.remove(i);
-                                let max = filter_list_item_count(na - 1, nr)
-                                    .saturating_sub(1);
+                                let max = filter_list_item_count(na - 1, nr).saturating_sub(1);
                                 if *selected > max {
                                     *selected = max;
                                 }
                             }
                             ListItem::ResourceCondition(i) => {
                                 popup.resource_conditions.remove(i);
-                                let max = filter_list_item_count(na, nr - 1)
-                                    .saturating_sub(1);
+                                let max = filter_list_item_count(na, nr - 1).saturating_sub(1);
                                 if *selected > max {
                                     *selected = max;
                                 }
@@ -635,10 +631,7 @@ impl App {
                 KeyCode::Down => {
                     let filtered: Vec<_> = candidates
                         .iter()
-                        .filter(|c| {
-                            c.to_ascii_lowercase()
-                                .contains(&input.to_ascii_lowercase())
-                        })
+                        .filter(|c| c.to_ascii_lowercase().contains(&input.to_ascii_lowercase()))
                         .collect();
                     let max = filtered.len().saturating_sub(1);
                     if *selected < max {
@@ -648,10 +641,7 @@ impl App {
                 KeyCode::Enter => {
                     let filtered: Vec<_> = candidates
                         .iter()
-                        .filter(|c| {
-                            c.to_ascii_lowercase()
-                                .contains(&input.to_ascii_lowercase())
-                        })
+                        .filter(|c| c.to_ascii_lowercase().contains(&input.to_ascii_lowercase()))
                         .cloned()
                         .collect();
                     let field = if let Some(f) = filtered.get(*selected) {
@@ -708,9 +698,7 @@ impl App {
                     let f = field.clone();
                     let candidates = match sec {
                         FilterSection::Attribute => self.available_log_fields.clone(),
-                        FilterSection::ResourceAttribute => {
-                            self.available_resource_fields.clone()
-                        }
+                        FilterSection::ResourceAttribute => self.available_resource_fields.clone(),
                     };
                     let popup = self.log_filter_popup.as_mut().unwrap();
                     popup.mode = FilterPopupMode::SelectField {
@@ -788,8 +776,7 @@ impl App {
                 if matches!(self.current_tab, tabs::Tab::Logs | tabs::Tab::Metrics)
                     && self.table_state.selected().is_some()
                 {
-                    let split_x =
-                        area.x + (area.width * (100 - self.detail_panel_percent) / 100);
+                    let split_x = area.x + (area.width * (100 - self.detail_panel_percent) / 100);
                     if mouse.column >= split_x.saturating_sub(1)
                         && mouse.column <= split_x + 1
                         && mouse.row >= area.y
@@ -865,10 +852,7 @@ impl App {
             return;
         }
         let state = self.active_table_state();
-        let i = state
-            .selected()
-            .map(|i| (i + 1) % len)
-            .unwrap_or(0);
+        let i = state.selected().map(|i| (i + 1) % len).unwrap_or(0);
         state.select(Some(i));
         self.update_follow_on_navigate(i, len);
     }
@@ -1005,8 +989,7 @@ impl App {
         self.logs_data = logs_data;
 
         if self.current_tab == tabs::Tab::Logs && self.follow && !self.logs_data.is_empty() {
-            self.table_state
-                .select(Some(self.logs_data.len() - 1));
+            self.table_state.select(Some(self.logs_data.len() - 1));
         }
 
         self.metrics_data = build_metric_groups(&metrics);
@@ -1095,11 +1078,7 @@ fn collect_all_spans(resource_spans: &[ResourceSpans]) -> Vec<CollectedSpan> {
                     span_name: span.name.clone(),
                     start_ns: span.start_time_unix_nano,
                     end_ns: span.end_time_unix_nano,
-                    status_code: span
-                        .status
-                        .as_ref()
-                        .map(|s| s.code)
-                        .unwrap_or(0),
+                    status_code: span.status.as_ref().map(|s| s.code).unwrap_or(0),
                 });
             }
         }
@@ -1118,15 +1097,12 @@ fn build_trace_summaries(resource_spans: &[ResourceSpans]) -> Vec<TraceSummary> 
     let mut summaries: Vec<TraceSummary> = grouped
         .into_iter()
         .map(|(trace_id, group)| {
-            let root = group
-                .iter()
-                .find(|s| s.parent_span_id.chars().all(|c| c == '0') || s.parent_span_id.is_empty());
+            let root = group.iter().find(|s| {
+                s.parent_span_id.chars().all(|c| c == '0') || s.parent_span_id.is_empty()
+            });
             let (root_service, root_span_name) = match root {
                 Some(r) => (r.service_name.clone(), r.span_name.clone()),
-                None => (
-                    group[0].service_name.clone(),
-                    group[0].span_name.clone(),
-                ),
+                None => (group[0].service_name.clone(), group[0].span_name.clone()),
             };
             let min_start = group.iter().map(|s| s.start_ns).min().unwrap_or(0);
             let max_end = group.iter().map(|s| s.end_ns).max().unwrap_or(0);
@@ -1148,7 +1124,10 @@ fn build_trace_summaries(resource_spans: &[ResourceSpans]) -> Vec<TraceSummary> 
 
 fn build_timeline_spans(resource_spans: &[ResourceSpans], trace_id: &str) -> Vec<TimelineSpan> {
     let all_spans = collect_all_spans(resource_spans);
-    let spans: Vec<&CollectedSpan> = all_spans.iter().filter(|s| s.trace_id == trace_id).collect();
+    let spans: Vec<&CollectedSpan> = all_spans
+        .iter()
+        .filter(|s| s.trace_id == trace_id)
+        .collect();
 
     if spans.is_empty() {
         return Vec::new();
@@ -1363,7 +1342,9 @@ fn build_metric_groups(resource_metrics: &[ResourceMetrics]) -> Vec<MetricGroup>
                 if !group.service_names.contains(&service_name) {
                     group.service_names.push(service_name.clone());
                 }
-                group.data_points.extend(extract_metric_data_points(&m.data));
+                group
+                    .data_points
+                    .extend(extract_metric_data_points(&m.data));
             }
         }
     }

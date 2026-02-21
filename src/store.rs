@@ -312,7 +312,8 @@ impl Store {
     }
 
     pub fn query_traces(&self, filter: &TraceFilter, limit: usize) -> Vec<ResourceSpans> {
-        let mut result: Vec<_> = self.traces
+        let mut result: Vec<_> = self
+            .traces
             .iter()
             .rev()
             .filter(|rs| {
@@ -331,9 +332,10 @@ impl Store {
 
                 if let Some(ref trace_id_hex) = filter.trace_id {
                     let expected_bytes = hex_decode(trace_id_hex);
-                    let has_matching_span = rs.scope_spans.iter().any(|ss| {
-                        ss.spans.iter().any(|span| span.trace_id == expected_bytes)
-                    });
+                    let has_matching_span = rs
+                        .scope_spans
+                        .iter()
+                        .any(|ss| ss.spans.iter().any(|span| span.trace_id == expected_bytes));
                     if !has_matching_span {
                         return false;
                     }
@@ -363,7 +365,8 @@ impl Store {
     }
 
     pub fn query_logs(&self, filter: &LogFilter, limit: usize) -> Vec<ResourceLogs> {
-        let mut result: Vec<_> = self.logs
+        let mut result: Vec<_> = self
+            .logs
             .iter()
             .rev()
             .filter(|rl| {
@@ -397,8 +400,7 @@ impl Store {
 
                 // Resource conditions
                 for cond in &filter.resource_conditions {
-                    let val = get_attribute_string(resource_attrs, &cond.field)
-                        .unwrap_or_default();
+                    let val = get_attribute_string(resource_attrs, &cond.field).unwrap_or_default();
                     if !matches_operator(&val, &cond.operator, &cond.value) {
                         return false;
                     }
@@ -443,7 +445,8 @@ impl Store {
     }
 
     pub fn query_metrics(&self, filter: &MetricFilter, limit: usize) -> Vec<ResourceMetrics> {
-        let mut result: Vec<_> = self.metrics
+        let mut result: Vec<_> = self
+            .metrics
             .iter()
             .rev()
             .filter(|rm| {
@@ -461,9 +464,10 @@ impl Store {
                 }
 
                 if let Some(ref metric_name) = filter.metric_name {
-                    let has_matching_name = rm.scope_metrics.iter().any(|sm| {
-                        sm.metrics.iter().any(|m| m.name == *metric_name)
-                    });
+                    let has_matching_name = rm
+                        .scope_metrics
+                        .iter()
+                        .any(|sm| sm.metrics.iter().any(|m| m.name == *metric_name));
                     if !has_matching_name {
                         return false;
                     }
@@ -683,11 +687,7 @@ mod tests {
     fn eviction_logs() {
         let (mut store, _rx) = Store::new(3);
         for i in 0..5 {
-            store.insert_logs(vec![make_resource_logs(
-                &format!("svc-{i}"),
-                "INFO",
-                &[],
-            )]);
+            store.insert_logs(vec![make_resource_logs(&format!("svc-{i}"), "INFO", &[])]);
         }
         assert_eq!(store.query_logs(&LogFilter::default(), 100).len(), 3);
     }
@@ -720,12 +720,12 @@ mod tests {
     fn filter_traces_by_trace_id() {
         let (mut store, _rx) = Store::new(100);
         let trace_id_a = [
-            0xab, 0xcd, 0xef, 0x01, 0x23, 0x45, 0x67, 0x89, 0x00, 0x00, 0x00, 0x00, 0x00,
-            0x00, 0x00, 0x01,
+            0xab, 0xcd, 0xef, 0x01, 0x23, 0x45, 0x67, 0x89, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x01,
         ];
         let trace_id_b = [
-            0xab, 0xcd, 0xef, 0x01, 0x23, 0x45, 0x67, 0x89, 0x00, 0x00, 0x00, 0x00, 0x00,
-            0x00, 0x00, 0x02,
+            0xab, 0xcd, 0xef, 0x01, 0x23, 0x45, 0x67, 0x89, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x02,
         ];
         store.insert_traces(vec![
             make_resource_spans("svc", &trace_id_a, &[]),
@@ -808,10 +808,10 @@ mod tests {
     fn filter_logs_by_severity_ge() {
         let (mut store, _rx) = Store::new(100);
         store.insert_logs(vec![
-            make_resource_logs("svc", "DEBUG", &[]),  // 5
-            make_resource_logs("svc", "INFO", &[]),   // 9
-            make_resource_logs("svc", "WARN", &[]),   // 13
-            make_resource_logs("svc", "ERROR", &[]),  // 17
+            make_resource_logs("svc", "DEBUG", &[]), // 5
+            make_resource_logs("svc", "INFO", &[]),  // 9
+            make_resource_logs("svc", "WARN", &[]),  // 13
+            make_resource_logs("svc", "ERROR", &[]), // 17
         ]);
         let filter = LogFilter {
             severity: Some(SeverityCondition {
@@ -828,10 +828,10 @@ mod tests {
     fn filter_logs_by_severity_lt() {
         let (mut store, _rx) = Store::new(100);
         store.insert_logs(vec![
-            make_resource_logs("svc", "DEBUG", &[]),  // 5
-            make_resource_logs("svc", "INFO", &[]),   // 9
-            make_resource_logs("svc", "WARN", &[]),   // 13
-            make_resource_logs("svc", "ERROR", &[]),  // 17
+            make_resource_logs("svc", "DEBUG", &[]), // 5
+            make_resource_logs("svc", "INFO", &[]),  // 9
+            make_resource_logs("svc", "WARN", &[]),  // 13
+            make_resource_logs("svc", "ERROR", &[]), // 17
         ]);
         let filter = LogFilter {
             severity: Some(SeverityCondition {
@@ -962,9 +962,27 @@ mod tests {
     #[test]
     fn insert_traces_sorted_by_timestamp() {
         let (mut store, _rx) = Store::new(100);
-        store.insert_traces(vec![make_resource_spans_full("svc-300", &[0; 16], &[], 300, 400)]);
-        store.insert_traces(vec![make_resource_spans_full("svc-100", &[0; 16], &[], 100, 200)]);
-        store.insert_traces(vec![make_resource_spans_full("svc-200", &[0; 16], &[], 200, 300)]);
+        store.insert_traces(vec![make_resource_spans_full(
+            "svc-300",
+            &[0; 16],
+            &[],
+            300,
+            400,
+        )]);
+        store.insert_traces(vec![make_resource_spans_full(
+            "svc-100",
+            &[0; 16],
+            &[],
+            100,
+            200,
+        )]);
+        store.insert_traces(vec![make_resource_spans_full(
+            "svc-200",
+            &[0; 16],
+            &[],
+            200,
+            300,
+        )]);
 
         let result = store.query_traces(&TraceFilter::default(), 100);
         let names: Vec<_> = result.iter().map(|rs| get_svc_name(rs)).collect();

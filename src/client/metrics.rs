@@ -1,9 +1,7 @@
 use crate::cli::OutputFormat;
+use crate::proto::opentelemetry::proto::metrics::v1::{metric, number_data_point, ResourceMetrics};
 use crate::proto::otelcli::query::v1::query_service_client::QueryServiceClient;
 use crate::proto::otelcli::query::v1::QueryMetricsRequest;
-use crate::proto::opentelemetry::proto::metrics::v1::{
-    metric, number_data_point, ResourceMetrics,
-};
 
 use super::{
     extract_any_value_string, format_attributes_json, format_timestamp, get_resource_attributes,
@@ -169,7 +167,10 @@ fn print_metrics_json(resource_metrics: &[ResourceMetrics]) -> anyhow::Result<()
 
 fn print_metrics_toon(resource_metrics: &[ResourceMetrics]) -> anyhow::Result<()> {
     let metrics = build_metrics_value(resource_metrics);
-    println!("{}", toon_format::encode_default(&serde_json::json!(metrics))?);
+    println!(
+        "{}",
+        toon_format::encode_default(&serde_json::json!(metrics))?
+    );
     Ok(())
 }
 

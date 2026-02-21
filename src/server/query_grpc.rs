@@ -34,7 +34,11 @@ fn non_empty(s: &str) -> Option<String> {
 
 /// Default limit when 0 or unset.
 fn effective_limit(limit: i32) -> usize {
-    if limit <= 0 { 100 } else { limit as usize }
+    if limit <= 0 {
+        100
+    } else {
+        limit as usize
+    }
 }
 
 fn build_log_filter(req: &QueryLogsRequest) -> LogFilter {

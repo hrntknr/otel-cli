@@ -9,8 +9,7 @@ use crate::proto::opentelemetry::proto::collector::{
         ExportMetricsServiceResponse,
     },
     trace::v1::{
-        trace_service_server::TraceService, ExportTraceServiceRequest,
-        ExportTraceServiceResponse,
+        trace_service_server::TraceService, ExportTraceServiceRequest, ExportTraceServiceResponse,
     },
 };
 use crate::store::SharedStore;

@@ -8,9 +8,7 @@ use tonic::transport::Channel;
 use otel_cli::proto::opentelemetry::proto::{
     collector::{
         logs::v1::{logs_service_client::LogsServiceClient, ExportLogsServiceRequest},
-        metrics::v1::{
-            metrics_service_client::MetricsServiceClient, ExportMetricsServiceRequest,
-        },
+        metrics::v1::{metrics_service_client::MetricsServiceClient, ExportMetricsServiceRequest},
         trace::v1::{trace_service_client::TraceServiceClient, ExportTraceServiceRequest},
     },
     common::v1::{any_value, AnyValue, InstrumentationScope, KeyValue},
@@ -259,7 +257,10 @@ fn trace_defs_post_order() -> Vec<SpanDef> {
             parent_idx: Some(3),
             attributes: vec![
                 kv("db.system", str_val("postgresql")),
-                kv("db.statement", str_val("INSERT INTO orders (...) VALUES (...)")),
+                kv(
+                    "db.statement",
+                    str_val("INSERT INTO orders (...) VALUES (...)"),
+                ),
             ],
         },
         // 7: send confirmation event
@@ -399,7 +400,10 @@ const LOG_TEMPLATES: &[LogDef] = &[
         body: "Database query timeout after 5000ms",
         attributes: &[
             ("db.system", LogAttrVal::Str("postgresql")),
-            ("db.statement", LogAttrVal::Str("SELECT * FROM users WHERE active = true")),
+            (
+                "db.statement",
+                LogAttrVal::Str("SELECT * FROM users WHERE active = true"),
+            ),
             ("db.duration_ms", LogAttrVal::Int(5000)),
             ("error.type", LogAttrVal::Str("TimeoutException")),
         ],
@@ -420,7 +424,10 @@ const LOG_TEMPLATES: &[LogDef] = &[
         body: "Slow query detected: SELECT users (>200ms)",
         attributes: &[
             ("db.system", LogAttrVal::Str("postgresql")),
-            ("db.statement", LogAttrVal::Str("SELECT * FROM users ORDER BY created_at DESC")),
+            (
+                "db.statement",
+                LogAttrVal::Str("SELECT * FROM users ORDER BY created_at DESC"),
+            ),
             ("db.duration_ms", LogAttrVal::Int(312)),
         ],
     },
