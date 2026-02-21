@@ -5,7 +5,9 @@ pub mod ui;
 use std::io;
 
 use crossterm::{
-    event::{DisableMouseCapture, EnableMouseCapture, KeyCode, KeyModifiers},
+    event::{
+        DisableMouseCapture, EnableMouseCapture, KeyCode, KeyModifiers, MouseEventKind,
+    },
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -87,6 +89,9 @@ pub struct App {
     pub timeline_spans: Vec<TimelineSpan>,
     pub timeline_table_state: TableState,
     raw_traces: Vec<ResourceSpans>,
+    pub detail_panel_percent: u16,
+    pub content_area: ratatui::layout::Rect,
+    dragging_split: bool,
 }
 
 impl App {
@@ -110,6 +115,9 @@ impl App {
             timeline_spans: Vec::new(),
             timeline_table_state: TableState::default(),
             raw_traces: Vec::new(),
+            detail_panel_percent: 40,
+            content_area: ratatui::layout::Rect::default(),
+            dragging_split: false,
         }
     }
 
@@ -124,6 +132,7 @@ impl App {
 
             match self.event_handler.next().await {
                 event::AppEvent::Key(key) => self.handle_key(key),
+                event::AppEvent::Mouse(mouse) => self.handle_mouse(mouse),
                 event::AppEvent::StoreUpdate => self.refresh_data().await,
                 event::AppEvent::Tick => {}
             }
@@ -149,40 +158,29 @@ impl App {
                 self.should_quit = true;
             }
             KeyCode::Tab => {
-                self.current_tab = self.current_tab.next();
-                self.table_state = TableState::default();
-                self.trace_view = TraceView::List;
+                self.switch_tab(self.current_tab.next());
             }
             KeyCode::BackTab => {
-                self.current_tab = self.current_tab.prev();
-                self.table_state = TableState::default();
-                self.trace_view = TraceView::List;
+                self.switch_tab(self.current_tab.prev());
             }
             KeyCode::Char('1') => {
-                self.current_tab = tabs::Tab::Logs;
-                self.table_state = TableState::default();
-                self.trace_view = TraceView::List;
+                self.switch_tab(tabs::Tab::Logs);
             }
             KeyCode::Char('2') => {
-                self.current_tab = tabs::Tab::Traces;
-                self.table_state = TableState::default();
-                self.trace_view = TraceView::List;
+                self.switch_tab(tabs::Tab::Traces);
             }
             KeyCode::Char('3') => {
-                self.current_tab = tabs::Tab::Metrics;
-                self.table_state = TableState::default();
-                self.trace_view = TraceView::List;
+                self.switch_tab(tabs::Tab::Metrics);
             }
             KeyCode::Down | KeyCode::Char('j') => self.select_next(),
             KeyCode::Up | KeyCode::Char('k') => self.select_prev(),
             KeyCode::PageDown | KeyCode::Char(' ') => self.select_next_page(),
             KeyCode::PageUp => self.select_prev_page(),
             KeyCode::Char('f') => {
-                if self.current_tab == tabs::Tab::Logs {
+                if matches!(self.current_tab, tabs::Tab::Logs | tabs::Tab::Traces) {
                     self.follow = !self.follow;
-                    if self.follow && !self.logs_data.is_empty() {
-                        self.table_state
-                            .select(Some(self.logs_data.len() - 1));
+                    if self.follow {
+                        self.follow_to_latest();
                     }
                 }
             }
@@ -220,6 +218,70 @@ impl App {
         }
     }
 
+    fn handle_mouse(&mut self, mouse: crossterm::event::MouseEvent) {
+        let area = self.content_area;
+        match mouse.kind {
+            MouseEventKind::ScrollDown => {
+                if mouse.row >= area.y && mouse.row < area.y + area.height {
+                    self.select_next();
+                }
+            }
+            MouseEventKind::ScrollUp => {
+                if mouse.row >= area.y && mouse.row < area.y + area.height {
+                    self.select_prev();
+                }
+            }
+            MouseEventKind::Down(crossterm::event::MouseButton::Left) => {
+                // Check if click is near the split border
+                if self.current_tab == tabs::Tab::Logs && self.table_state.selected().is_some() {
+                    let split_x =
+                        area.x + (area.width * (100 - self.detail_panel_percent) / 100);
+                    if mouse.column >= split_x.saturating_sub(1)
+                        && mouse.column <= split_x + 1
+                        && mouse.row >= area.y
+                        && mouse.row < area.y + area.height
+                    {
+                        self.dragging_split = true;
+                    }
+                }
+            }
+            MouseEventKind::Drag(crossterm::event::MouseButton::Left) => {
+                if self.dragging_split && area.width > 0 {
+                    let relative_x = mouse.column.saturating_sub(area.x);
+                    let left_percent = (relative_x as u16 * 100) / area.width;
+                    self.detail_panel_percent = left_percent.clamp(20, 80);
+                    // detail_panel_percent is the right side, so invert
+                    self.detail_panel_percent = 100 - left_percent.clamp(20, 80);
+                }
+            }
+            MouseEventKind::Up(crossterm::event::MouseButton::Left) => {
+                self.dragging_split = false;
+            }
+            _ => {}
+        }
+    }
+
+    fn switch_tab(&mut self, tab: tabs::Tab) {
+        self.current_tab = tab;
+        self.table_state = TableState::default();
+        self.trace_view = TraceView::List;
+        if matches!(tab, tabs::Tab::Logs | tabs::Tab::Traces) {
+            self.follow = true;
+            self.follow_to_latest();
+        }
+    }
+
+    fn follow_to_latest(&mut self) {
+        let len = self.current_list_len();
+        if len > 0 {
+            self.active_table_state().select(Some(len - 1));
+        }
+    }
+
+    fn is_followable_tab(&self) -> bool {
+        matches!(self.current_tab, tabs::Tab::Logs | tabs::Tab::Traces)
+    }
+
     fn current_list_len(&self) -> usize {
         match self.current_tab {
             tabs::Tab::Traces => match self.trace_view {
@@ -251,9 +313,7 @@ impl App {
             .map(|i| (i + 1) % len)
             .unwrap_or(0);
         state.select(Some(i));
-        if self.current_tab == tabs::Tab::Logs && i == len - 1 {
-            self.follow = true;
-        }
+        self.update_follow_on_navigate(i, len);
     }
 
     fn select_prev(&mut self) {
@@ -267,9 +327,7 @@ impl App {
             .map(|i| if i == 0 { len - 1 } else { i - 1 })
             .unwrap_or(0);
         state.select(Some(i));
-        if self.current_tab == tabs::Tab::Logs {
-            self.follow = false;
-        }
+        self.update_follow_on_navigate(i, len);
     }
 
     fn select_next_page(&mut self) {
@@ -284,9 +342,7 @@ impl App {
             .map(|i| (i + page).min(len - 1))
             .unwrap_or(0);
         state.select(Some(i));
-        if self.current_tab == tabs::Tab::Logs && i == len - 1 {
-            self.follow = true;
-        }
+        self.update_follow_on_navigate(i, len);
     }
 
     fn select_prev_page(&mut self) {
@@ -301,9 +357,14 @@ impl App {
             .map(|i| i.saturating_sub(page))
             .unwrap_or(0);
         state.select(Some(i));
-        if self.current_tab == tabs::Tab::Logs {
-            self.follow = false;
+        self.update_follow_on_navigate(i, len);
+    }
+
+    fn update_follow_on_navigate(&mut self, i: usize, len: usize) {
+        if !self.is_followable_tab() {
+            return;
         }
+        self.follow = i == len - 1;
     }
 
     async fn clear_current_tab(&mut self) {
@@ -337,6 +398,15 @@ impl App {
         self.trace_summaries = build_trace_summaries(&self.raw_traces);
         if let TraceView::Timeline(ref trace_id) = self.trace_view {
             self.timeline_spans = build_timeline_spans(&self.raw_traces, trace_id);
+        }
+
+        if self.current_tab == tabs::Tab::Traces && self.follow {
+            if let TraceView::List = self.trace_view {
+                if !self.trace_summaries.is_empty() {
+                    self.table_state
+                        .select(Some(self.trace_summaries.len() - 1));
+                }
+            }
         }
 
         self.logs_data = logs
@@ -440,7 +510,7 @@ fn build_trace_summaries(resource_spans: &[ResourceSpans]) -> Vec<TraceSummary> 
         })
         .collect();
 
-    summaries.sort_by(|a, b| b.start_time.cmp(&a.start_time));
+    summaries.sort_by(|a, b| a.start_time.cmp(&b.start_time));
     summaries
 }
 

@@ -1,22 +1,47 @@
-use crossterm::event::{self, Event, KeyEvent};
+use crossterm::event::{self, Event, KeyEvent, MouseEvent};
 use std::time::Duration;
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, mpsc};
 
 use crate::store::StoreEvent;
 
 pub enum AppEvent {
     Key(KeyEvent),
+    Mouse(MouseEvent),
     StoreUpdate,
     Tick,
 }
 
+enum TermEvent {
+    Key(KeyEvent),
+    Mouse(MouseEvent),
+}
+
 pub struct EventHandler {
     store_rx: broadcast::Receiver<StoreEvent>,
+    term_rx: mpsc::UnboundedReceiver<TermEvent>,
 }
 
 impl EventHandler {
     pub fn new(store_rx: broadcast::Receiver<StoreEvent>) -> Self {
-        Self { store_rx }
+        let (term_tx, term_rx) = mpsc::unbounded_channel();
+        std::thread::spawn(move || loop {
+            if event::poll(Duration::from_millis(250)).unwrap_or(false) {
+                match event::read() {
+                    Ok(Event::Key(key)) => {
+                        if term_tx.send(TermEvent::Key(key)).is_err() {
+                            break;
+                        }
+                    }
+                    Ok(Event::Mouse(mouse)) => {
+                        if term_tx.send(TermEvent::Mouse(mouse)).is_err() {
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        });
+        Self { store_rx, term_rx }
     }
 
     pub async fn next(&mut self) -> AppEvent {
@@ -29,17 +54,11 @@ impl EventHandler {
                         Err(_) => return AppEvent::Tick,
                     }
                 }
-                result = tokio::task::spawn_blocking(|| {
-                    if event::poll(Duration::from_millis(250)).unwrap_or(false) {
-                        if let Ok(Event::Key(key)) = event::read() {
-                            return Some(key);
-                        }
-                    }
-                    None
-                }) => {
+                result = self.term_rx.recv() => {
                     match result {
-                        Ok(Some(key)) => return AppEvent::Key(key),
-                        _ => return AppEvent::Tick,
+                        Some(TermEvent::Key(key)) => return AppEvent::Key(key),
+                        Some(TermEvent::Mouse(mouse)) => return AppEvent::Mouse(mouse),
+                        None => return AppEvent::Tick,
                     }
                 }
             }

@@ -14,8 +14,9 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         ])
         .split(frame.area());
 
-    draw_tabs(frame, chunks[0], app.current_tab);
+    draw_tabs(frame, chunks[0], app);
 
+    app.content_area = chunks[1];
     // borders(2) + header(1) + header margin(1) = 4
     app.page_size = chunks[1].height.saturating_sub(4) as usize;
 
@@ -31,11 +32,22 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     draw_status_bar(frame, chunks[2], app);
 }
 
-fn draw_tabs(frame: &mut Frame, area: Rect, current_tab: Tab) {
-    let titles: Vec<&str> = Tab::all().iter().map(|t| t.title()).collect();
+fn draw_tabs(frame: &mut Frame, area: Rect, app: &App) {
+    let titles: Vec<String> = Tab::all()
+        .iter()
+        .enumerate()
+        .map(|(i, t)| {
+            let count = match t {
+                Tab::Logs => app.log_count,
+                Tab::Traces => app.trace_count,
+                Tab::Metrics => app.metric_count,
+            };
+            format!("{}:{}({})", i + 1, t.title(), count)
+        })
+        .collect();
     let selected = Tab::all()
         .iter()
-        .position(|t| *t == current_tab)
+        .position(|t| *t == app.current_tab)
         .unwrap_or(0);
 
     let tabs = Tabs::new(titles)
@@ -245,9 +257,13 @@ fn draw_logs_table_basic(frame: &mut Frame, area: Rect, app: &mut App) {
 
 fn draw_logs_split(frame: &mut Frame, area: Rect, app: &mut App) {
     if app.table_state.selected().is_some() {
+        let left = 100 - app.detail_panel_percent;
         let chunks = Layout::default()
             .direction(Direction::Horizontal)
-            .constraints([Constraint::Percentage(60), Constraint::Percentage(40)])
+            .constraints([
+                Constraint::Percentage(left),
+                Constraint::Percentage(app.detail_panel_percent),
+            ])
             .split(area);
 
         draw_logs_table_basic(frame, chunks[0], app);
@@ -378,29 +394,24 @@ fn draw_metrics_table(frame: &mut Frame, area: Rect, app: &mut App) {
 }
 
 fn draw_status_bar(frame: &mut Frame, area: Rect, app: &App) {
-    let counts = format!(
-        "Traces: {} | Logs: {} | Metrics: {}",
-        app.trace_count, app.log_count, app.metric_count
-    );
-    let keys = match app.current_tab {
+    let status = match app.current_tab {
         Tab::Logs => {
             let follow_str = if app.follow { "ON" } else { "OFF" };
-            format!(
-                "[f]ollow:{} | c:Clear | q:Quit Tab:Switch j/k:Navigate",
-                follow_str
-            )
+            format!("[f]ollow:{} | c:Clear | q:Quit", follow_str)
         }
-        Tab::Traces => match app.trace_view {
-            TraceView::List => {
-                "Enter:Open | c:Clear | q:Quit Tab:Switch j/k:Navigate".to_string()
+        Tab::Traces => {
+            let follow_str = if app.follow { "ON" } else { "OFF" };
+            match app.trace_view {
+                TraceView::List => {
+                    format!("Enter:Open | [f]ollow:{} | c:Clear | q:Quit", follow_str)
+                }
+                TraceView::Timeline(_) => {
+                    format!("Esc:Back | [f]ollow:{} | c:Clear | q:Quit", follow_str)
+                }
             }
-            TraceView::Timeline(_) => {
-                "Esc:Back | c:Clear | q:Quit Tab:Switch j/k:Navigate".to_string()
-            }
-        },
-        _ => "c:Clear | q:Quit Tab:Switch j/k:Navigate".to_string(),
+        }
+        _ => "c:Clear | q:Quit".to_string(),
     };
-    let status = format!("{} | {}", counts, keys);
     let paragraph =
         Paragraph::new(status).style(Style::default().fg(Color::Black).bg(Color::White));
     frame.render_widget(paragraph, area);

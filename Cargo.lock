@@ -1472,6 +1472,7 @@ dependencies = [
  "http-body-util",
  "prost",
  "prost-types",
+ "rand 0.9.2",
  "ratatui",
  "reqwest",
  "serde",
