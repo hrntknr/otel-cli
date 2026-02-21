@@ -11,6 +11,7 @@ async fn main() -> anyhow::Result<()> {
         Commands::Server {
             grpc_addr,
             http_addr,
+            query_addr,
             max_items,
             no_tui,
         } => {
@@ -19,9 +20,10 @@ async fn main() -> anyhow::Result<()> {
 
             let grpc_addr: std::net::SocketAddr = grpc_addr.parse()?;
             let http_addr: std::net::SocketAddr = http_addr.parse()?;
+            let query_addr: std::net::SocketAddr = query_addr.parse()?;
 
-            let (grpc_listener, http_listener) =
-                server::bind_listeners(grpc_addr, http_addr).await?;
+            let (grpc_listener, http_listener, query_listener) =
+                server::bind_listeners(grpc_addr, http_addr, query_addr).await?;
 
             let grpc_handle = tokio::spawn(server::run_grpc_server(
                 grpc_listener,
@@ -33,24 +35,32 @@ async fn main() -> anyhow::Result<()> {
                 store.clone(),
                 shutdown.clone(),
             ));
+            let query_handle = tokio::spawn(server::run_query_server(
+                query_listener,
+                store.clone(),
+                shutdown.clone(),
+            ));
 
             if no_tui {
                 eprintln!("gRPC server listening on {}", grpc_addr);
                 eprintln!("HTTP server listening on {}", http_addr);
+                eprintln!("Query server listening on {}", query_addr);
                 tokio::signal::ctrl_c().await.ok();
                 eprintln!("\nShutting down...");
                 shutdown.cancel();
                 let _ = grpc_handle.await;
                 let _ = http_handle.await;
+                let _ = query_handle.await;
             } else {
                 eprintln!(
-                    "Starting OTLP server (gRPC: {}, HTTP: {})",
-                    grpc_addr, http_addr
+                    "Starting OTLP server (gRPC: {}, HTTP: {}, Query: {})",
+                    grpc_addr, http_addr, query_addr
                 );
                 otel_cli::tui::run(store.clone(), event_rx).await?;
                 shutdown.cancel();
                 let _ = grpc_handle.await;
                 let _ = http_handle.await;
+                let _ = query_handle.await;
             }
 
             Ok(())

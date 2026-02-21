@@ -18,14 +18,28 @@ pub async fn run_grpc_server(
     store: SharedStore,
     shutdown: CancellationToken,
 ) -> anyhow::Result<()> {
-    let otlp_service = Arc::new(otlp_grpc::OtlpGrpcService::new(store.clone()));
-    let query_service = query_grpc::QueryGrpcService::new(store);
+    let otlp_service = Arc::new(otlp_grpc::OtlpGrpcService::new(store));
 
     let incoming = tonic::transport::server::TcpIncoming::from(listener);
     tonic::transport::Server::builder()
         .add_service(TraceServiceServer::from_arc(otlp_service.clone()))
         .add_service(LogsServiceServer::from_arc(otlp_service.clone()))
         .add_service(MetricsServiceServer::from_arc(otlp_service))
+        .serve_with_incoming_shutdown(incoming, shutdown.cancelled())
+        .await?;
+
+    Ok(())
+}
+
+pub async fn run_query_server(
+    listener: tokio::net::TcpListener,
+    store: SharedStore,
+    shutdown: CancellationToken,
+) -> anyhow::Result<()> {
+    let query_service = query_grpc::QueryGrpcService::new(store);
+
+    let incoming = tonic::transport::server::TcpIncoming::from(listener);
+    tonic::transport::Server::builder()
         .add_service(QueryServiceServer::new(query_service))
         .serve_with_incoming_shutdown(incoming, shutdown.cancelled())
         .await?;
@@ -45,16 +59,24 @@ pub async fn run_http_server(
     Ok(())
 }
 
-/// Bind TCP listeners for both ports upfront, returning an error if either port is in use.
+/// Bind TCP listeners for all ports upfront, returning an error if any port is in use.
 pub async fn bind_listeners(
     grpc_addr: std::net::SocketAddr,
     http_addr: std::net::SocketAddr,
-) -> anyhow::Result<(tokio::net::TcpListener, tokio::net::TcpListener)> {
+    query_addr: std::net::SocketAddr,
+) -> anyhow::Result<(
+    tokio::net::TcpListener,
+    tokio::net::TcpListener,
+    tokio::net::TcpListener,
+)> {
     let grpc_listener = tokio::net::TcpListener::bind(grpc_addr)
         .await
         .map_err(|e| anyhow::anyhow!("Failed to bind gRPC address {}: {}", grpc_addr, e))?;
     let http_listener = tokio::net::TcpListener::bind(http_addr)
         .await
         .map_err(|e| anyhow::anyhow!("Failed to bind HTTP address {}: {}", http_addr, e))?;
-    Ok((grpc_listener, http_listener))
+    let query_listener = tokio::net::TcpListener::bind(query_addr)
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to bind query address {}: {}", query_addr, e))?;
+    Ok((grpc_listener, http_listener, query_listener))
 }

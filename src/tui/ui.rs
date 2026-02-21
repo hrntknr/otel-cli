@@ -415,12 +415,13 @@ fn draw_metrics_table(frame: &mut Frame, area: Rect, app: &mut App) {
 }
 
 fn draw_metrics_split(frame: &mut Frame, area: Rect, app: &mut App) {
-    if app.table_state.selected().is_some() {
+    if app.metric_detail_open && app.table_state.selected().is_some() {
+        let left = 100 - app.detail_panel_percent;
         let chunks = Layout::default()
             .direction(Direction::Horizontal)
             .constraints([
-                Constraint::Percentage(50),
-                Constraint::Percentage(50),
+                Constraint::Percentage(left),
+                Constraint::Percentage(app.detail_panel_percent),
             ])
             .split(area);
 
@@ -576,7 +577,14 @@ fn draw_status_bar(frame: &mut Frame, area: Rect, app: &App) {
                 }
             }
         }
-        _ => "c:Clear | q:Quit".to_string(),
+        Tab::Metrics => {
+            let detail_str = if app.metric_detail_open {
+                "Esc:Close"
+            } else {
+                "Enter:Open"
+            };
+            format!("{} | c:Clear | q:Quit", detail_str)
+        }
     };
     let paragraph =
         Paragraph::new(status).style(Style::default().fg(Color::Black).bg(Color::White));

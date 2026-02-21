@@ -11,12 +11,15 @@ pub struct Cli {
 pub enum Commands {
     /// Start OTLP server with TUI viewer
     Server {
-        /// gRPC listen address
+        /// gRPC listen address (OTLP collector)
         #[arg(long, default_value = "0.0.0.0:4317")]
         grpc_addr: String,
-        /// HTTP listen address
+        /// HTTP listen address (OTLP collector)
         #[arg(long, default_value = "0.0.0.0:4318")]
         http_addr: String,
+        /// Query API listen address
+        #[arg(long, default_value = "0.0.0.0:4319")]
+        query_addr: String,
         /// Maximum items to keep in store
         #[arg(long, default_value = "10000")]
         max_items: usize,
@@ -27,7 +30,7 @@ pub enum Commands {
     /// Query logs from server
     Log {
         /// Server address
-        #[arg(long, default_value = "http://localhost:4317")]
+        #[arg(long, default_value = "http://localhost:4319")]
         server: String,
         /// Filter by service name
         #[arg(long)]
@@ -48,7 +51,7 @@ pub enum Commands {
     /// Query traces from server
     Trace {
         /// Server address
-        #[arg(long, default_value = "http://localhost:4317")]
+        #[arg(long, default_value = "http://localhost:4319")]
         server: String,
         /// Filter by service name
         #[arg(long)]
@@ -69,7 +72,7 @@ pub enum Commands {
     /// Clear stored data on server
     Clear {
         /// Server address
-        #[arg(long, default_value = "http://localhost:4317")]
+        #[arg(long, default_value = "http://localhost:4319")]
         server: String,
         /// Clear traces
         #[arg(long)]
@@ -84,7 +87,7 @@ pub enum Commands {
     /// Query metrics from server
     Metrics {
         /// Server address
-        #[arg(long, default_value = "http://localhost:4317")]
+        #[arg(long, default_value = "http://localhost:4319")]
         server: String,
         /// Filter by service name
         #[arg(long)]
@@ -126,11 +129,13 @@ mod tests {
             Commands::Server {
                 grpc_addr,
                 http_addr,
+                query_addr,
                 max_items,
                 no_tui,
             } => {
                 assert_eq!(grpc_addr, "0.0.0.0:4317");
                 assert_eq!(http_addr, "0.0.0.0:4318");
+                assert_eq!(query_addr, "0.0.0.0:4319");
                 assert_eq!(max_items, 10000);
                 assert!(!no_tui);
             }
@@ -147,6 +152,8 @@ mod tests {
             "127.0.0.1:5317",
             "--http-addr",
             "127.0.0.1:5318",
+            "--query-addr",
+            "127.0.0.1:5319",
             "--max-items",
             "5000",
             "--no-tui",
@@ -155,11 +162,13 @@ mod tests {
             Commands::Server {
                 grpc_addr,
                 http_addr,
+                query_addr,
                 max_items,
                 no_tui,
             } => {
                 assert_eq!(grpc_addr, "127.0.0.1:5317");
                 assert_eq!(http_addr, "127.0.0.1:5318");
+                assert_eq!(query_addr, "127.0.0.1:5319");
                 assert_eq!(max_items, 5000);
                 assert!(no_tui);
             }
@@ -192,7 +201,7 @@ mod tests {
                 limit,
                 format,
             } => {
-                assert_eq!(server, "http://localhost:4317");
+                assert_eq!(server, "http://localhost:4319");
                 assert_eq!(service, Some("my-service".to_string()));
                 assert_eq!(severity, Some("ERROR".to_string()));
                 assert_eq!(
@@ -225,7 +234,7 @@ mod tests {
                 limit,
                 format,
             } => {
-                assert_eq!(server, "http://localhost:4317");
+                assert_eq!(server, "http://localhost:4319");
                 assert_eq!(service, Some("frontend".to_string()));
                 assert_eq!(trace_id, Some("abc123def456".to_string()));
                 assert!(attribute.is_empty());
@@ -256,7 +265,7 @@ mod tests {
                 limit,
                 format,
             } => {
-                assert_eq!(server, "http://localhost:4317");
+                assert_eq!(server, "http://localhost:4319");
                 assert_eq!(service, Some("api-gateway".to_string()));
                 assert_eq!(name, Some("http.request.duration".to_string()));
                 assert_eq!(limit, 200);

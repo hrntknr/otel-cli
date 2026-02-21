@@ -220,6 +220,7 @@ pub struct App {
     pub follow: bool,
     pub page_size: usize,
     pub log_detail_open: bool,
+    pub metric_detail_open: bool,
     should_quit: bool,
     pending_clear: bool,
     pub trace_view: TraceView,
@@ -255,6 +256,7 @@ impl App {
             follow: true,
             page_size: 20,
             log_detail_open: true,
+            metric_detail_open: true,
             should_quit: false,
             pending_clear: false,
             trace_view: TraceView::default(),
@@ -385,6 +387,8 @@ impl App {
             KeyCode::Enter => {
                 if self.current_tab == tabs::Tab::Logs {
                     self.log_detail_open = true;
+                } else if self.current_tab == tabs::Tab::Metrics {
+                    self.metric_detail_open = true;
                 } else if self.current_tab == tabs::Tab::Traces {
                     if let TraceView::List = self.trace_view {
                         if let Some(idx) = self.table_state.selected() {
@@ -424,6 +428,9 @@ impl App {
                 }
                 if self.current_tab == tabs::Tab::Logs {
                     self.log_detail_open = false;
+                }
+                if self.current_tab == tabs::Tab::Metrics {
+                    self.metric_detail_open = false;
                 }
             }
             _ => {}
@@ -777,7 +784,9 @@ impl App {
             }
             MouseEventKind::Down(crossterm::event::MouseButton::Left) => {
                 // Check if click is near the split border
-                if self.current_tab == tabs::Tab::Logs && self.table_state.selected().is_some() {
+                if matches!(self.current_tab, tabs::Tab::Logs | tabs::Tab::Metrics)
+                    && self.table_state.selected().is_some()
+                {
                     let split_x =
                         area.x + (area.width * (100 - self.detail_panel_percent) / 100);
                     if mouse.column >= split_x.saturating_sub(1)
@@ -812,6 +821,9 @@ impl App {
         if matches!(tab, tabs::Tab::Logs | tabs::Tab::Traces) {
             self.follow = true;
             self.follow_to_latest();
+        }
+        if tab == tabs::Tab::Metrics && !self.metrics_data.is_empty() {
+            self.table_state.select(Some(0));
         }
     }
 
@@ -997,6 +1009,13 @@ impl App {
         }
 
         self.metrics_data = build_metric_groups(&metrics);
+
+        if self.current_tab == tabs::Tab::Metrics
+            && self.table_state.selected().is_none()
+            && !self.metrics_data.is_empty()
+        {
+            self.table_state.select(Some(0));
+        }
     }
 
     fn update_available_fields(&mut self, logs: &[ResourceLogs]) {

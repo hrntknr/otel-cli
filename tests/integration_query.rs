@@ -39,27 +39,44 @@ fn make_resource(service_name: &str) -> Option<Resource> {
     })
 }
 
-async fn start_grpc_server(port: u16) -> (store::SharedStore, CancellationToken) {
+async fn start_servers(
+    grpc_port: u16,
+    query_port: u16,
+) -> (store::SharedStore, CancellationToken) {
     let (shared_store, _rx) = store::new_shared(1000);
-    let addr: std::net::SocketAddr = format!("127.0.0.1:{}", port).parse().unwrap();
-    let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
-    let store_clone = shared_store.clone();
     let shutdown = CancellationToken::new();
+
+    let grpc_addr: std::net::SocketAddr = format!("127.0.0.1:{}", grpc_port).parse().unwrap();
+    let grpc_listener = tokio::net::TcpListener::bind(grpc_addr).await.unwrap();
+    let store_clone = shared_store.clone();
     let shutdown_clone = shutdown.clone();
     tokio::spawn(async move {
-        otel_cli::server::run_grpc_server(listener, store_clone, shutdown_clone)
+        otel_cli::server::run_grpc_server(grpc_listener, store_clone, shutdown_clone)
             .await
             .unwrap();
     });
+
+    let query_addr: std::net::SocketAddr = format!("127.0.0.1:{}", query_port).parse().unwrap();
+    let query_listener = tokio::net::TcpListener::bind(query_addr).await.unwrap();
+    let store_clone = shared_store.clone();
+    let shutdown_clone = shutdown.clone();
+    tokio::spawn(async move {
+        otel_cli::server::run_query_server(query_listener, store_clone, shutdown_clone)
+            .await
+            .unwrap();
+    });
+
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     (shared_store, shutdown)
 }
 
 #[tokio::test]
 async fn test_query_traces_with_service_filter() {
-    let port = get_available_port();
-    let (_store, _shutdown) = start_grpc_server(port).await;
-    let addr = format!("http://127.0.0.1:{}", port);
+    let grpc_port = get_available_port();
+    let query_port = get_available_port();
+    let (_store, _shutdown) = start_servers(grpc_port, query_port).await;
+    let addr = format!("http://127.0.0.1:{}", grpc_port);
+    let query_addr = format!("http://127.0.0.1:{}", query_port);
 
     // Ingest traces from two services
     let mut trace_client = TraceServiceClient::connect(addr.clone()).await.unwrap();
@@ -100,7 +117,7 @@ async fn test_query_traces_with_service_filter() {
         .unwrap();
 
     // Query filtering by service-a
-    let mut query_client = QueryServiceClient::connect(addr).await.unwrap();
+    let mut query_client = QueryServiceClient::connect(query_addr).await.unwrap();
     let response = query_client
         .query_traces(QueryTracesRequest {
             service_name: "service-a".into(),
@@ -118,9 +135,11 @@ async fn test_query_traces_with_service_filter() {
 
 #[tokio::test]
 async fn test_query_logs_with_severity_filter() {
-    let port = get_available_port();
-    let (_store, _shutdown) = start_grpc_server(port).await;
-    let addr = format!("http://127.0.0.1:{}", port);
+    let grpc_port = get_available_port();
+    let query_port = get_available_port();
+    let (_store, _shutdown) = start_servers(grpc_port, query_port).await;
+    let addr = format!("http://127.0.0.1:{}", grpc_port);
+    let query_addr = format!("http://127.0.0.1:{}", query_port);
 
     // Ingest logs with different severities
     let mut logs_client = LogsServiceClient::connect(addr.clone()).await.unwrap();
@@ -159,7 +178,7 @@ async fn test_query_logs_with_severity_filter() {
         .unwrap();
 
     // Query filtering by severity ERROR
-    let mut query_client = QueryServiceClient::connect(addr).await.unwrap();
+    let mut query_client = QueryServiceClient::connect(query_addr).await.unwrap();
     let response = query_client
         .query_logs(QueryLogsRequest {
             service_name: String::new(),
@@ -177,9 +196,11 @@ async fn test_query_logs_with_severity_filter() {
 
 #[tokio::test]
 async fn test_query_metrics_with_name_filter() {
-    let port = get_available_port();
-    let (_store, _shutdown) = start_grpc_server(port).await;
-    let addr = format!("http://127.0.0.1:{}", port);
+    let grpc_port = get_available_port();
+    let query_port = get_available_port();
+    let (_store, _shutdown) = start_servers(grpc_port, query_port).await;
+    let addr = format!("http://127.0.0.1:{}", grpc_port);
+    let query_addr = format!("http://127.0.0.1:{}", query_port);
 
     // Ingest metrics with different names
     let mut metrics_client = MetricsServiceClient::connect(addr.clone()).await.unwrap();
@@ -226,7 +247,7 @@ async fn test_query_metrics_with_name_filter() {
         .unwrap();
 
     // Query filtering by metric name
-    let mut query_client = QueryServiceClient::connect(addr).await.unwrap();
+    let mut query_client = QueryServiceClient::connect(query_addr).await.unwrap();
     let response = query_client
         .query_metrics(QueryMetricsRequest {
             service_name: String::new(),
