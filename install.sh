@@ -16,6 +16,7 @@ main() {
 detect_platform() {
     OS="$(uname -s)"
     ARCH="$(uname -m)"
+    EXE=""
 
     case "$OS" in
         Linux)
@@ -28,6 +29,14 @@ detect_platform() {
         Darwin)
             case "$ARCH" in
                 arm64) TARGET="aarch64-apple-darwin" ;;
+                *) abort "Unsupported architecture: $ARCH" ;;
+            esac
+            ;;
+        MINGW*|MSYS*|CYGWIN*)
+            EXE=".exe"
+            case "$ARCH" in
+                x86_64) TARGET="x86_64-pc-windows-msvc" ;;
+                aarch64|arm64) TARGET="aarch64-pc-windows-msvc" ;;
                 *) abort "Unsupported architecture: $ARCH" ;;
             esac
             ;;
@@ -45,9 +54,9 @@ fetch_latest_version() {
 }
 
 download_binary() {
-    URL="https://github.com/${REPO}/releases/download/${VERSION}/${BINARY}-${TARGET}"
+    URL="https://github.com/${REPO}/releases/download/${VERSION}/${BINARY}-${TARGET}${EXE}"
     TMPDIR="$(mktemp -d)"
-    TMPFILE="${TMPDIR}/${BINARY}"
+    TMPFILE="${TMPDIR}/${BINARY}${EXE}"
 
     info "Downloading ${BINARY} ${VERSION} for ${TARGET}..."
     curl -fsSL -o "$TMPFILE" "$URL"
@@ -56,10 +65,10 @@ download_binary() {
 
 install_binary() {
     if [ -w "$INSTALL_DIR" ]; then
-        mv "$TMPFILE" "${INSTALL_DIR}/${BINARY}"
+        mv "$TMPFILE" "${INSTALL_DIR}/${BINARY}${EXE}"
     else
         info "Installing to ${INSTALL_DIR} (requires sudo)..."
-        sudo mv "$TMPFILE" "${INSTALL_DIR}/${BINARY}"
+        sudo mv "$TMPFILE" "${INSTALL_DIR}/${BINARY}${EXE}"
     fi
     rm -rf "$TMPDIR"
 }
@@ -67,7 +76,7 @@ install_binary() {
 print_success() {
     cat <<EOF
 
-  otel-cli ${VERSION} installed to ${INSTALL_DIR}/${BINARY}
+  otel-cli ${VERSION} installed to ${INSTALL_DIR}/${BINARY}${EXE}
 
   Get started:
     $ otel-cli server            Start server with interactive TUI
