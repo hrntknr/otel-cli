@@ -16,23 +16,48 @@ Receive traces, logs, and metrics via standard OTLP protocols, store them in-mem
 
 ## Installation
 
+### From GitHub Releases
+
+Pre-built binaries are available on the [Releases](https://github.com/hrntknr/otel-cli/releases) page for Linux (x86_64), macOS (ARM), and Windows.
+
+```bash
+# Example: Linux x86_64
+curl -L https://github.com/hrntknr/otel-cli/releases/latest/download/otel-cli-x86_64-unknown-linux-gnu -o otel-cli
+chmod +x otel-cli
+sudo mv otel-cli /usr/local/bin/
+```
+
+### From source
+
 ```bash
 cargo install --path .
 ```
+
+## Getting Started
+
+1. Start the server:
+
+```bash
+otel-cli server
+```
+
+This launches an interactive TUI where you can inspect traces, logs, and metrics in real-time.
+
+2. Configure your application's OTLP exporter to send to `localhost:4317` (gRPC) or `localhost:4318` (HTTP).
+
+3. As data arrives, it appears live in the TUI.
 
 ## Usage
 
 ### Start the server
 
 ```bash
-# With interactive TUI
+# With interactive TUI (default)
 otel-cli server
 
 # Headless mode
 otel-cli server --no-tui
 ```
-
-Configure your application's OTLP exporter to send to `localhost:4317` (gRPC) or `localhost:4318` (HTTP).
 
 ### Query traces
 
