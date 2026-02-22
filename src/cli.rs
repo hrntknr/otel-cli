@@ -105,6 +105,15 @@ pub enum Commands {
         #[arg(long)]
         metrics: bool,
     },
+    /// Attach to a running server and display TUI
+    View {
+        /// Query API server address
+        #[arg(long, default_value = "http://localhost:4319")]
+        server: String,
+        /// Maximum items to keep in local store
+        #[arg(long, default_value = "1000")]
+        max_items: usize,
+    },
     /// Query metrics from server
     Metrics {
         /// Server address
@@ -346,6 +355,37 @@ mod tests {
                 );
             }
             _ => panic!("Expected Log command"),
+        }
+    }
+
+    #[test]
+    fn view_subcommand_parses_with_defaults() {
+        let cli = Cli::parse_from(["otel-cli", "view"]);
+        match cli.command {
+            Commands::View { server, max_items } => {
+                assert_eq!(server, "http://localhost:4319");
+                assert_eq!(max_items, 1000);
+            }
+            _ => panic!("Expected View command"),
+        }
+    }
+
+    #[test]
+    fn view_subcommand_parses_with_custom_args() {
+        let cli = Cli::parse_from([
+            "otel-cli",
+            "view",
+            "--server",
+            "http://remote:5319",
+            "--max-items",
+            "500",
+        ]);
+        match cli.command {
+            Commands::View { server, max_items } => {
+                assert_eq!(server, "http://remote:5319");
+                assert_eq!(max_items, 500);
+            }
+            _ => panic!("Expected View command"),
         }
     }
 

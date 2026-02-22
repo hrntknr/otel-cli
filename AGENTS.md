@@ -17,6 +17,7 @@ cargo clippy                         # Lint
 cargo fmt                            # Format
 cargo run -- server                  # Start OTLP server (gRPC:4317, HTTP:4318, Query:4319)
 cargo run -- server --tui            # Start with TUI
+cargo run -- view                    # Attach TUI to a running server (default: localhost:4319)
 cargo run -- trace                   # Query traces
 cargo run -- log                     # Query logs
 cargo run -- metrics                 # Query metrics
@@ -28,9 +29,9 @@ cargo run -- metrics                 # Query metrics
 
 - **`src/store.rs`** — Central in-memory store. Traces are grouped by trace_id as `TraceGroup` with version tracking for delta streaming. Logs and metrics use `VecDeque` with FIFO eviction. Filtering (service name, attributes, time range, severity) happens at query time via `FilterCondition`/`FilterOperator`.
 - **`src/server/`** — Three listeners: `otlp_grpc.rs` (standard OTLP TraceService/LogsService/MetricsService), `otlp_http.rs` (Axum `/v1/traces`, `/v1/logs`, `/v1/metrics`), `query_grpc.rs` (custom QueryService with streaming follow support).
-- **`src/client/`** — CLI query commands. Each submodule (trace, log, metrics, clear) builds gRPC requests and formats output (Text/JSON/TOON). `mod.rs` contains shared utilities: `hex_encode`, `parse_time_spec`, `format_attributes_json`, `format_timestamp`.
+- **`src/client/`** — CLI query commands. Each submodule (trace, log, metrics, clear) builds gRPC requests and formats output (Text/JSON/TOON). `view.rs` connects to a running server's Follow streams and pipes data into a local Store to drive the TUI. `mod.rs` contains shared utilities: `hex_encode`, `parse_time_spec`, `format_attributes_json`, `format_timestamp`.
 - **`src/tui/`** — ratatui-based interactive UI with tabs for traces/logs/metrics. Uses broadcast channel events (`TracesAdded`, `LogsAdded`, etc.) for real-time updates. Dirty tracking for efficient refresh.
-- **`src/cli.rs`** — clap derive command definitions (Server, Trace, Log, Metrics, Clear).
+- **`src/cli.rs`** — clap derive command definitions (Server, View, Trace, Log, Metrics, Clear).
 - **`proto/query.proto`** — Custom query/follow/clear gRPC API. Standard OTLP protos are in `proto/opentelemetry-proto/` (git submodule).
 - **`build.rs`** — Compiles protobuf files via `tonic_prost_build`.
 

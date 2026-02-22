@@ -2,6 +2,7 @@ pub mod clear;
 pub mod log;
 pub mod metrics;
 pub mod trace;
+pub mod view;
 
 use crate::proto::opentelemetry::proto::common::v1::{any_value, AnyValue, KeyValue};
 use crate::proto::opentelemetry::proto::resource::v1::Resource;

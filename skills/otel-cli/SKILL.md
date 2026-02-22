@@ -36,6 +36,21 @@ otel-cli server --no-tui --grpc-addr 0.0.0.0:4317 --http-addr 0.0.0.0:4318 --que
 otel-cli server --no-tui --max-items 5000
 ```
 
+### View (Attach TUI to Running Server)
+
+Connect to an already running server and display the same interactive TUI.
+
+```bash
+# Attach to default server (localhost:4319)
+otel-cli view
+
+# Attach to a remote server
+otel-cli view --server http://remote-host:4319
+
+# Customize local store capacity
+otel-cli view --max-items 500
+```
+
 ### Query Traces
 
 Retrieve distributed traces from the server.

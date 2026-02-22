@@ -101,6 +101,19 @@ otel-cli metrics --name http_requests_total
 otel-cli metrics -f --format json
 ```
 
+### Attach to a running server (view mode)
+
+```bash
+# Connect to a running server and display the same interactive TUI
+otel-cli view
+
+# Connect to a remote server
+otel-cli view --server http://remote-host:4319
+
+# Customize local store capacity
+otel-cli view --max-items 500
+```
+
 ### Clear data
 
 ```bash
@@ -135,6 +148,8 @@ OTLP Ingestion (gRPC:4317 / HTTP:4318)
    │         │
 Query API   TUI
 (gRPC:4319)
+   │
+   └──── otel-cli view (remote TUI via Follow streams)
 ```
 
 ## Development

@@ -123,6 +123,10 @@ async fn main() -> anyhow::Result<()> {
             client::clear::clear(&server, traces, logs, metrics).await?;
             Ok(())
         }
+        Commands::View { server, max_items } => {
+            client::view::run_view(&server, max_items).await?;
+            Ok(())
+        }
         Commands::Metrics {
             server,
             service,
