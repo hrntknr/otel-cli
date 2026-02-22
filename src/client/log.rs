@@ -7,34 +7,7 @@ use super::{
     extract_any_value_string, format_attributes_json, format_timestamp, get_resource_attributes,
 };
 
-/// Parse a time specification into nanoseconds since epoch.
-///
-/// Supported formats:
-/// - Relative: `30s`, `5m`, `1h`, `2d` (interpreted as now - duration)
-/// - Absolute: RFC3339 string like `2024-01-01T00:00:00Z`
-pub fn parse_time_spec(s: &str) -> anyhow::Result<u64> {
-    let s_trimmed = s.trim();
-
-    // Try relative duration first
-    const UNITS: &[(char, u64)] = &[('s', 1), ('m', 60), ('h', 3600), ('d', 86400)];
-    for &(suffix, multiplier) in UNITS {
-        if let Some(num_str) = s_trimmed.strip_suffix(suffix) {
-            if let Ok(n) = num_str.parse::<u64>() {
-                let now = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)?
-                    .as_nanos() as u64;
-                return Ok(now - n * multiplier * 1_000_000_000);
-            }
-        }
-    }
-
-    // Try RFC3339
-    let dt = chrono::DateTime::parse_from_rfc3339(s_trimmed)
-        .map_err(|e| anyhow::anyhow!("invalid time spec '{}': {}", s, e))?;
-    Ok(dt
-        .timestamp_nanos_opt()
-        .ok_or_else(|| anyhow::anyhow!("timestamp out of range: {}", s))? as u64)
-}
+use super::parse_time_spec;
 
 fn build_query_request(
     service: Option<String>,
@@ -203,68 +176,4 @@ fn print_logs_toon(resource_logs: &[ResourceLogs]) -> anyhow::Result<()> {
     let logs = build_logs_value(resource_logs);
     println!("{}", toon_format::encode_default(&serde_json::json!(logs))?);
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn parse_relative_seconds() {
-        let result = parse_time_spec("30s").unwrap();
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos() as u64;
-        // Should be approximately now - 30s (allow 1s tolerance)
-        assert!(now - result > 29 * 1_000_000_000);
-        assert!(now - result < 31 * 1_000_000_000);
-    }
-
-    #[test]
-    fn parse_relative_minutes() {
-        let result = parse_time_spec("5m").unwrap();
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos() as u64;
-        let diff = now - result;
-        assert!(diff > 4 * 60 * 1_000_000_000);
-        assert!(diff < 6 * 60 * 1_000_000_000);
-    }
-
-    #[test]
-    fn parse_relative_hours() {
-        let result = parse_time_spec("1h").unwrap();
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos() as u64;
-        let diff = now - result;
-        assert!(diff > 59 * 60 * 1_000_000_000);
-        assert!(diff < 61 * 60 * 1_000_000_000);
-    }
-
-    #[test]
-    fn parse_relative_days() {
-        let result = parse_time_spec("2d").unwrap();
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos() as u64;
-        let diff = now - result;
-        assert!(diff > 47 * 3600 * 1_000_000_000);
-        assert!(diff < 49 * 3600 * 1_000_000_000);
-    }
-
-    #[test]
-    fn parse_rfc3339() {
-        let result = parse_time_spec("2024-01-01T00:00:00Z").unwrap();
-        assert_eq!(result, 1_704_067_200_000_000_000);
-    }
-
-    #[test]
-    fn parse_invalid() {
-        assert!(parse_time_spec("invalid").is_err());
-    }
 }

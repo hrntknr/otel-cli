@@ -41,6 +41,45 @@ fn effective_limit(limit: i32) -> usize {
     }
 }
 
+fn build_trace_filter(req: &QueryTracesRequest) -> TraceFilter {
+    TraceFilter {
+        service_name: non_empty(&req.service_name),
+        trace_id: non_empty(&req.trace_id),
+        attributes: req
+            .attributes
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect(),
+        start_time_ns: if req.start_time_unix_nano != 0 {
+            Some(req.start_time_unix_nano)
+        } else {
+            None
+        },
+        end_time_ns: if req.end_time_unix_nano != 0 {
+            Some(req.end_time_unix_nano)
+        } else {
+            None
+        },
+    }
+}
+
+fn build_metric_filter(req: &QueryMetricsRequest) -> MetricFilter {
+    MetricFilter {
+        service_name: non_empty(&req.service_name),
+        metric_name: non_empty(&req.metric_name),
+        start_time_ns: if req.start_time_unix_nano != 0 {
+            Some(req.start_time_unix_nano)
+        } else {
+            None
+        },
+        end_time_ns: if req.end_time_unix_nano != 0 {
+            Some(req.end_time_unix_nano)
+        } else {
+            None
+        },
+    }
+}
+
 fn build_log_filter(req: &QueryLogsRequest) -> LogFilter {
     let attribute_conditions = req
         .attributes
@@ -81,19 +120,19 @@ fn build_log_filter(req: &QueryLogsRequest) -> LogFilter {
 
 #[tonic::async_trait]
 impl QueryServiceTrait for QueryGrpcService {
+    type FollowTracesStream =
+        Pin<Box<dyn Stream<Item = Result<QueryTracesResponse, Status>> + Send + 'static>>;
     type FollowLogsStream =
         Pin<Box<dyn Stream<Item = Result<QueryLogsResponse, Status>> + Send + 'static>>;
+    type FollowMetricsStream =
+        Pin<Box<dyn Stream<Item = Result<QueryMetricsResponse, Status>> + Send + 'static>>;
 
     async fn query_traces(
         &self,
         request: Request<QueryTracesRequest>,
     ) -> Result<Response<QueryTracesResponse>, Status> {
         let req = request.into_inner();
-        let filter = TraceFilter {
-            service_name: non_empty(&req.service_name),
-            trace_id: non_empty(&req.trace_id),
-            attributes: req.attributes.into_iter().collect(),
-        };
+        let filter = build_trace_filter(&req);
         let limit = effective_limit(req.limit);
         let store = self.store.read().await;
         let groups = store.query_traces(&filter, limit);
@@ -182,19 +221,147 @@ impl QueryServiceTrait for QueryGrpcService {
         Ok(Response::new(Box::pin(stream)))
     }
 
+    async fn follow_traces(
+        &self,
+        request: Request<QueryTracesRequest>,
+    ) -> Result<Response<Self::FollowTracesStream>, Status> {
+        let req = request.into_inner();
+        let limit = effective_limit(req.limit);
+        let delta = req.delta;
+        let store = self.store.clone();
+
+        let filter = build_trace_filter(&req);
+        let initial_groups = {
+            let s = store.read().await;
+            s.query_traces(&filter, limit)
+        };
+
+        let mut last_version = {
+            let s = store.read().await;
+            s.current_trace_version()
+        };
+
+        let event_rx = store.read().await.subscribe();
+        let event_stream = BroadcastStream::new(event_rx);
+
+        let stream = async_stream::try_stream! {
+            if !initial_groups.is_empty() {
+                let trace_groups = initial_groups
+                    .into_iter()
+                    .map(|g| crate::proto::otelcli::query::v1::TraceGroup {
+                        trace_id: g.trace_id,
+                        resource_spans: g.resource_spans,
+                    })
+                    .collect();
+                yield QueryTracesResponse { trace_groups };
+            }
+
+            tokio::pin!(event_stream);
+            while let Some(event_result) = event_stream.next().await {
+                let event = match event_result {
+                    Ok(e) => e,
+                    Err(_) => continue,
+                };
+                if !matches!(event, StoreEvent::TracesAdded) {
+                    continue;
+                }
+
+                let new_groups = {
+                    let s = store.read().await;
+                    let filter = build_trace_filter(&req);
+                    let groups = if delta {
+                        s.query_traces_delta_since_version(&filter, last_version)
+                    } else {
+                        s.query_traces_since_version(&filter, last_version)
+                    };
+                    last_version = s.current_trace_version();
+                    groups
+                };
+
+                if !new_groups.is_empty() {
+                    let trace_groups = new_groups
+                        .into_iter()
+                        .map(|g| crate::proto::otelcli::query::v1::TraceGroup {
+                            trace_id: g.trace_id,
+                            resource_spans: g.resource_spans,
+                        })
+                        .collect();
+                    yield QueryTracesResponse { trace_groups };
+                }
+            }
+        };
+
+        Ok(Response::new(Box::pin(stream)))
+    }
+
     async fn query_metrics(
         &self,
         request: Request<QueryMetricsRequest>,
     ) -> Result<Response<QueryMetricsResponse>, Status> {
         let req = request.into_inner();
-        let filter = MetricFilter {
-            service_name: non_empty(&req.service_name),
-            metric_name: non_empty(&req.metric_name),
-        };
+        let filter = build_metric_filter(&req);
         let limit = effective_limit(req.limit);
         let store = self.store.read().await;
         let resource_metrics = store.query_metrics(&filter, limit);
         Ok(Response::new(QueryMetricsResponse { resource_metrics }))
+    }
+
+    async fn follow_metrics(
+        &self,
+        request: Request<QueryMetricsRequest>,
+    ) -> Result<Response<Self::FollowMetricsStream>, Status> {
+        let req = request.into_inner();
+        let limit = effective_limit(req.limit);
+        let store = self.store.clone();
+
+        let filter = build_metric_filter(&req);
+        let initial_metrics = {
+            let s = store.read().await;
+            s.query_metrics(&filter, limit)
+        };
+
+        let mut last_ts: u64 = initial_metrics
+            .iter()
+            .map(crate::store::metric_sort_key)
+            .max()
+            .unwrap_or(0);
+
+        let event_rx = store.read().await.subscribe();
+        let event_stream = BroadcastStream::new(event_rx);
+
+        let stream = async_stream::try_stream! {
+            if !initial_metrics.is_empty() {
+                yield QueryMetricsResponse { resource_metrics: initial_metrics };
+            }
+
+            tokio::pin!(event_stream);
+            while let Some(event_result) = event_stream.next().await {
+                let event = match event_result {
+                    Ok(e) => e,
+                    Err(_) => continue,
+                };
+                if !matches!(event, StoreEvent::MetricsAdded) {
+                    continue;
+                }
+
+                let mut delta_filter = build_metric_filter(&req);
+                delta_filter.start_time_ns = Some(last_ts + 1);
+
+                let new_metrics = {
+                    let s = store.read().await;
+                    s.query_metrics(&delta_filter, usize::MAX)
+                };
+
+                if !new_metrics.is_empty() {
+                    if let Some(max_ts) = new_metrics.iter().map(crate::store::metric_sort_key).max() {
+                        last_ts = max_ts;
+                    }
+                    yield QueryMetricsResponse { resource_metrics: new_metrics };
+                }
+            }
+        };
+
+        Ok(Response::new(Box::pin(stream)))
     }
 
     async fn clear_traces(

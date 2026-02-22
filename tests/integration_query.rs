@@ -15,6 +15,7 @@ use otel_cli::proto::otelcli::query::v1::{
     QueryTracesRequest,
 };
 use otel_cli::store;
+use tokio::time::{timeout, Duration};
 use tokio_util::sync::CancellationToken;
 
 fn get_available_port() -> u16 {
@@ -117,6 +118,9 @@ async fn test_query_traces_with_service_filter() {
             trace_id: String::new(),
             attributes: Default::default(),
             limit: 100,
+            start_time_unix_nano: 0,
+            end_time_unix_nano: 0,
+            delta: false,
         })
         .await
         .unwrap();
@@ -360,6 +364,8 @@ async fn test_query_metrics_with_name_filter() {
             service_name: String::new(),
             metric_name: "cpu_usage".into(),
             limit: 100,
+            start_time_unix_nano: 0,
+            end_time_unix_nano: 0,
         })
         .await
         .unwrap();
@@ -367,4 +373,104 @@ async fn test_query_metrics_with_name_filter() {
     let metrics = response.into_inner().resource_metrics;
     assert_eq!(metrics.len(), 1);
     assert_eq!(metrics[0].scope_metrics[0].metrics[0].name, "cpu_usage");
+}
+
+#[tokio::test]
+async fn test_follow_traces_delta_returns_only_new_spans() {
+    let grpc_port = get_available_port();
+    let query_port = get_available_port();
+    let (_store, _shutdown) = start_servers(grpc_port, query_port).await;
+    let addr = format!("http://127.0.0.1:{}", grpc_port);
+    let query_addr = format!("http://127.0.0.1:{}", query_port);
+
+    // Ingest initial span for trace [1;16]
+    let mut trace_client = TraceServiceClient::connect(addr.clone()).await.unwrap();
+    trace_client
+        .export(ExportTraceServiceRequest {
+            resource_spans: vec![ResourceSpans {
+                resource: make_resource("svc-a"),
+                scope_spans: vec![ScopeSpans {
+                    scope: None,
+                    spans: vec![Span {
+                        trace_id: vec![1; 16],
+                        span_id: vec![1; 8],
+                        name: "span-1".into(),
+                        start_time_unix_nano: 100,
+                        end_time_unix_nano: 200,
+                        ..Default::default()
+                    }],
+                    schema_url: String::new(),
+                }],
+                schema_url: String::new(),
+            }],
+        })
+        .await
+        .unwrap();
+
+    // Start follow_traces with delta=true
+    let mut query_client = QueryServiceClient::connect(query_addr.clone())
+        .await
+        .unwrap();
+    let mut stream = query_client
+        .follow_traces(QueryTracesRequest {
+            service_name: String::new(),
+            trace_id: String::new(),
+            attributes: Default::default(),
+            limit: 100,
+            start_time_unix_nano: 0,
+            end_time_unix_nano: 0,
+            delta: true,
+        })
+        .await
+        .unwrap()
+        .into_inner();
+
+    // First message: initial batch with all existing spans
+    let initial = timeout(Duration::from_secs(2), stream.message())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(initial.trace_groups.len(), 1);
+    assert_eq!(initial.trace_groups[0].resource_spans.len(), 1);
+    assert_eq!(
+        initial.trace_groups[0].resource_spans[0].scope_spans[0].spans[0].name,
+        "span-1"
+    );
+
+    // Add a second span to the same trace
+    trace_client
+        .export(ExportTraceServiceRequest {
+            resource_spans: vec![ResourceSpans {
+                resource: make_resource("svc-a"),
+                scope_spans: vec![ScopeSpans {
+                    scope: None,
+                    spans: vec![Span {
+                        trace_id: vec![1; 16],
+                        span_id: vec![2; 8],
+                        name: "span-2".into(),
+                        start_time_unix_nano: 200,
+                        end_time_unix_nano: 300,
+                        ..Default::default()
+                    }],
+                    schema_url: String::new(),
+                }],
+                schema_url: String::new(),
+            }],
+        })
+        .await
+        .unwrap();
+
+    // Delta message should contain only span-2, not span-1
+    let delta = timeout(Duration::from_secs(2), stream.message())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(delta.trace_groups.len(), 1);
+    assert_eq!(delta.trace_groups[0].resource_spans.len(), 1);
+    assert_eq!(
+        delta.trace_groups[0].resource_spans[0].scope_spans[0].spans[0].name,
+        "span-2"
+    );
 }

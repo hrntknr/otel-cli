@@ -4,9 +4,38 @@ use crate::proto::otelcli::query::v1::{QueryTracesRequest, TraceGroup};
 
 use super::{
     extract_any_value_string, format_attributes_json, format_timestamp, get_resource_attributes,
-    hex_encode,
+    hex_encode, parse_time_spec,
 };
 
+fn build_query_request(
+    service: Option<String>,
+    trace_id: Option<String>,
+    attributes: Vec<(String, String)>,
+    limit: i32,
+    since: Option<String>,
+    until: Option<String>,
+    delta: bool,
+) -> anyhow::Result<QueryTracesRequest> {
+    let start_time_unix_nano = match since {
+        Some(ref s) => parse_time_spec(s)?,
+        None => 0,
+    };
+    let end_time_unix_nano = match until {
+        Some(ref s) => parse_time_spec(s)?,
+        None => 0,
+    };
+    Ok(QueryTracesRequest {
+        service_name: service.unwrap_or_default(),
+        trace_id: trace_id.unwrap_or_default(),
+        attributes: attributes.into_iter().collect(),
+        limit,
+        start_time_unix_nano,
+        end_time_unix_nano,
+        delta,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
 pub async fn query_traces(
     server: &str,
     service: Option<String>,
@@ -14,16 +43,11 @@ pub async fn query_traces(
     attributes: Vec<(String, String)>,
     limit: i32,
     format: &OutputFormat,
+    since: Option<String>,
+    until: Option<String>,
 ) -> anyhow::Result<()> {
     let mut client = QueryServiceClient::connect(server.to_string()).await?;
-
-    let request = QueryTracesRequest {
-        service_name: service.unwrap_or_default(),
-        trace_id: trace_id.unwrap_or_default(),
-        attributes: attributes.into_iter().collect(),
-        limit,
-    };
-
+    let request = build_query_request(service, trace_id, attributes, limit, since, until, false)?;
     let response = client.query_traces(request).await?.into_inner();
 
     match format {
@@ -35,6 +59,39 @@ pub async fn query_traces(
         }
         OutputFormat::Toon => {
             print_traces_toon(&response.trace_groups)?;
+        }
+    }
+
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn follow_traces(
+    server: &str,
+    service: Option<String>,
+    trace_id: Option<String>,
+    attributes: Vec<(String, String)>,
+    limit: i32,
+    format: &OutputFormat,
+    since: Option<String>,
+    until: Option<String>,
+    delta: bool,
+) -> anyhow::Result<()> {
+    let mut client = QueryServiceClient::connect(server.to_string()).await?;
+    let request = build_query_request(service, trace_id, attributes, limit, since, until, delta)?;
+    let mut stream = client.follow_traces(request).await?.into_inner();
+
+    while let Some(msg) = stream.message().await? {
+        match format {
+            OutputFormat::Json => {
+                print_traces_json(&msg.trace_groups)?;
+            }
+            OutputFormat::Text => {
+                print_traces_text(&msg.trace_groups);
+            }
+            OutputFormat::Toon => {
+                print_traces_toon(&msg.trace_groups)?;
+            }
         }
     }
 

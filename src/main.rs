@@ -96,9 +96,22 @@ async fn main() -> anyhow::Result<()> {
             attribute,
             limit,
             format,
+            follow,
+            full,
+            since,
+            until,
         } => {
-            client::trace::query_traces(&server, service, trace_id, attribute, limit, &format)
+            if follow {
+                client::trace::follow_traces(
+                    &server, service, trace_id, attribute, limit, &format, since, until, !full,
+                )
                 .await?;
+            } else {
+                client::trace::query_traces(
+                    &server, service, trace_id, attribute, limit, &format, since, until,
+                )
+                .await?;
+            }
             Ok(())
         }
         Commands::Clear {
@@ -116,8 +129,21 @@ async fn main() -> anyhow::Result<()> {
             name,
             limit,
             format,
+            follow,
+            since,
+            until,
         } => {
-            client::metrics::query_metrics(&server, service, name, limit, &format).await?;
+            if follow {
+                client::metrics::follow_metrics(
+                    &server, service, name, limit, &format, since, until,
+                )
+                .await?;
+            } else {
+                client::metrics::query_metrics(
+                    &server, service, name, limit, &format, since, until,
+                )
+                .await?;
+            }
             Ok(())
         }
     }

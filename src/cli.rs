@@ -77,6 +77,18 @@ pub enum Commands {
         /// Output format
         #[arg(long, default_value = "text")]
         format: OutputFormat,
+        /// Follow new traces in real-time
+        #[arg(short = 'f', long)]
+        follow: bool,
+        /// Show full trace groups instead of only new spans in follow mode
+        #[arg(long)]
+        full: bool,
+        /// Show traces since (e.g. 30s, 5m, 1h, 2d, or RFC3339)
+        #[arg(long)]
+        since: Option<String>,
+        /// Show traces until (e.g. 30s, 5m, 1h, 2d, or RFC3339)
+        #[arg(long)]
+        until: Option<String>,
     },
     /// Clear stored data on server
     Clear {
@@ -110,6 +122,15 @@ pub enum Commands {
         /// Output format
         #[arg(long, default_value = "text")]
         format: OutputFormat,
+        /// Follow new metrics in real-time
+        #[arg(short = 'f', long)]
+        follow: bool,
+        /// Show metrics since (e.g. 30s, 5m, 1h, 2d, or RFC3339)
+        #[arg(long)]
+        since: Option<String>,
+        /// Show metrics until (e.g. 30s, 5m, 1h, 2d, or RFC3339)
+        #[arg(long)]
+        until: Option<String>,
     },
 }
 
@@ -249,6 +270,10 @@ mod tests {
                 attribute,
                 limit,
                 format,
+                follow,
+                full,
+                since,
+                until,
             } => {
                 assert_eq!(server, "http://localhost:4319");
                 assert_eq!(service, Some("frontend".to_string()));
@@ -256,6 +281,10 @@ mod tests {
                 assert!(attribute.is_empty());
                 assert_eq!(limit, 100);
                 assert!(matches!(format, OutputFormat::Text));
+                assert!(!follow);
+                assert!(!full);
+                assert!(since.is_none());
+                assert!(until.is_none());
             }
             _ => panic!("Expected Trace command"),
         }
@@ -280,12 +309,18 @@ mod tests {
                 name,
                 limit,
                 format,
+                follow,
+                since,
+                until,
             } => {
                 assert_eq!(server, "http://localhost:4319");
                 assert_eq!(service, Some("api-gateway".to_string()));
                 assert_eq!(name, Some("http.request.duration".to_string()));
                 assert_eq!(limit, 200);
                 assert!(matches!(format, OutputFormat::Text));
+                assert!(!follow);
+                assert!(since.is_none());
+                assert!(until.is_none());
             }
             _ => panic!("Expected Metrics command"),
         }

@@ -109,6 +109,9 @@ async fn test_e2e_trace_query() {
             trace_id: String::new(),
             attributes: Default::default(),
             limit: 100,
+            start_time_unix_nano: 0,
+            end_time_unix_nano: 0,
+            delta: false,
         })
         .await
         .unwrap();
@@ -225,6 +228,8 @@ async fn test_e2e_metric_query() {
             service_name: "test-metric-svc".into(),
             metric_name: "request_count".into(),
             limit: 100,
+            start_time_unix_nano: 0,
+            end_time_unix_nano: 0,
         })
         .await
         .unwrap();

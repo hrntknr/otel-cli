@@ -5,23 +5,45 @@ use crate::proto::otelcli::query::v1::QueryMetricsRequest;
 
 use super::{
     extract_any_value_string, format_attributes_json, format_timestamp, get_resource_attributes,
+    parse_time_spec,
 };
 
+fn build_query_request(
+    service: Option<String>,
+    name: Option<String>,
+    limit: i32,
+    since: Option<String>,
+    until: Option<String>,
+) -> anyhow::Result<QueryMetricsRequest> {
+    let start_time_unix_nano = match since {
+        Some(ref s) => parse_time_spec(s)?,
+        None => 0,
+    };
+    let end_time_unix_nano = match until {
+        Some(ref s) => parse_time_spec(s)?,
+        None => 0,
+    };
+    Ok(QueryMetricsRequest {
+        service_name: service.unwrap_or_default(),
+        metric_name: name.unwrap_or_default(),
+        limit,
+        start_time_unix_nano,
+        end_time_unix_nano,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
 pub async fn query_metrics(
     server: &str,
     service: Option<String>,
     name: Option<String>,
     limit: i32,
     format: &OutputFormat,
+    since: Option<String>,
+    until: Option<String>,
 ) -> anyhow::Result<()> {
     let mut client = QueryServiceClient::connect(server.to_string()).await?;
-
-    let request = QueryMetricsRequest {
-        service_name: service.unwrap_or_default(),
-        metric_name: name.unwrap_or_default(),
-        limit,
-    };
-
+    let request = build_query_request(service, name, limit, since, until)?;
     let response = client.query_metrics(request).await?.into_inner();
 
     match format {
@@ -33,6 +55,36 @@ pub async fn query_metrics(
         }
         OutputFormat::Toon => {
             print_metrics_toon(&response.resource_metrics)?;
+        }
+    }
+
+    Ok(())
+}
+
+pub async fn follow_metrics(
+    server: &str,
+    service: Option<String>,
+    name: Option<String>,
+    limit: i32,
+    format: &OutputFormat,
+    since: Option<String>,
+    until: Option<String>,
+) -> anyhow::Result<()> {
+    let mut client = QueryServiceClient::connect(server.to_string()).await?;
+    let request = build_query_request(service, name, limit, since, until)?;
+    let mut stream = client.follow_metrics(request).await?.into_inner();
+
+    while let Some(msg) = stream.message().await? {
+        match format {
+            OutputFormat::Json => {
+                print_metrics_json(&msg.resource_metrics)?;
+            }
+            OutputFormat::Text => {
+                print_metrics_text(&msg.resource_metrics);
+            }
+            OutputFormat::Toon => {
+                print_metrics_toon(&msg.resource_metrics)?;
+            }
         }
     }
 

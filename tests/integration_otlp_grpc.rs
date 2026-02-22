@@ -100,6 +100,9 @@ async fn test_grpc_trace_ingest_and_query() {
             trace_id: String::new(),
             attributes: Default::default(),
             limit: 10,
+            start_time_unix_nano: 0,
+            end_time_unix_nano: 0,
+            delta: false,
         })
         .await
         .unwrap();
@@ -199,6 +202,8 @@ async fn test_grpc_metrics_ingest_and_query() {
             service_name: "metric-service".into(),
             metric_name: String::new(),
             limit: 10,
+            start_time_unix_nano: 0,
+            end_time_unix_nano: 0,
         })
         .await
         .unwrap();
