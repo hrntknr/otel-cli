@@ -71,7 +71,6 @@ pub struct SeverityCondition {
 
 #[derive(Default, Clone, Debug)]
 pub struct LogFilter {
-    pub service_name: Option<String>,
     pub severity: Option<SeverityCondition>,
     pub attribute_conditions: Vec<FilterCondition>,
     pub resource_conditions: Vec<FilterCondition>,
@@ -334,15 +333,7 @@ fn matches_severity(severity_number: i32, condition: &SeverityCondition) -> bool
     let Some(threshold) = severity_text_to_number(&condition.value) else {
         return false;
     };
-    match condition.operator {
-        FilterOperator::Eq => severity_number == threshold,
-        FilterOperator::NotEq => severity_number != threshold,
-        FilterOperator::Ge => severity_number >= threshold,
-        FilterOperator::Gt => severity_number > threshold,
-        FilterOperator::Le => severity_number <= threshold,
-        FilterOperator::Lt => severity_number < threshold,
-        _ => false,
-    }
+    apply_ord_operator(severity_number, &condition.operator, threshold)
 }
 
 impl Store {
@@ -510,15 +501,6 @@ impl Store {
                     .as_ref()
                     .map(|r| r.attributes.as_slice())
                     .unwrap_or_default();
-
-                // Service name filter
-                if let Some(ref service_name) = filter.service_name {
-                    if get_attribute_string(resource_attrs, "service.name").as_deref()
-                        != Some(service_name.as_str())
-                    {
-                        return false;
-                    }
-                }
 
                 // Time range filter
                 let ts = log_sort_key(rl);
@@ -1187,7 +1169,11 @@ mod tests {
             make_resource_logs("frontend", "ERROR", &[]),
         ]);
         let filter = LogFilter {
-            service_name: Some("frontend".into()),
+            resource_conditions: vec![FilterCondition {
+                field: "service.name".into(),
+                operator: FilterOperator::Eq,
+                value: "frontend".into(),
+            }],
             ..Default::default()
         };
         let result = store.query_logs(&filter, 100);
@@ -1240,7 +1226,11 @@ mod tests {
             make_resource_logs_full("frontend", "ERROR", &[], 400),
         ]);
         let filter = LogFilter {
-            service_name: Some("frontend".into()),
+            resource_conditions: vec![FilterCondition {
+                field: "service.name".into(),
+                operator: FilterOperator::Eq,
+                value: "frontend".into(),
+            }],
             start_time_ns: Some(200),
             ..Default::default()
         };

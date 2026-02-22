@@ -836,8 +836,6 @@ impl App {
                 if self.dragging_split && area.width > 0 {
                     let relative_x = mouse.column.saturating_sub(area.x);
                     let left_percent = (relative_x * 100) / area.width;
-                    self.detail_panel_percent = left_percent.clamp(20, 80);
-                    // detail_panel_percent is the right side, so invert
                     self.detail_panel_percent = 100 - left_percent.clamp(20, 80);
                 }
             }

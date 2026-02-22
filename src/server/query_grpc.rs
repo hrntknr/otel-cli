@@ -51,13 +51,21 @@ fn build_log_filter(req: &QueryLogsRequest) -> LogFilter {
             value: v.clone(),
         })
         .collect();
+    let mut resource_conditions = Vec::new();
+    if let Some(service_name) = non_empty(&req.service_name) {
+        resource_conditions.push(FilterCondition {
+            field: "service.name".into(),
+            operator: FilterOperator::Eq,
+            value: service_name,
+        });
+    }
     LogFilter {
-        service_name: non_empty(&req.service_name),
         severity: non_empty(&req.severity).map(|sev| SeverityCondition {
             operator: FilterOperator::Ge,
             value: sev,
         }),
         attribute_conditions,
+        resource_conditions,
         start_time_ns: if req.start_time_unix_nano != 0 {
             Some(req.start_time_unix_nano)
         } else {
@@ -68,7 +76,6 @@ fn build_log_filter(req: &QueryLogsRequest) -> LogFilter {
         } else {
             None
         },
-        ..Default::default()
     }
 }
 
