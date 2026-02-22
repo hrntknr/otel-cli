@@ -27,7 +27,6 @@ detect_platform() {
             ;;
         Darwin)
             case "$ARCH" in
-                x86_64) TARGET="x86_64-apple-darwin" ;;
                 arm64) TARGET="aarch64-apple-darwin" ;;
                 *) abort "Unsupported architecture: $ARCH" ;;
             esac
