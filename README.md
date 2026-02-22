@@ -120,18 +120,3 @@ otel-cli clear --traces
 | `-f, --follow`            | Follow new data in real-time                            |
 | `--since <SPEC>`          | Time range start (`30s`, `5m`, `1h`, `2d`, or RFC3339)  |
 | `--until <SPEC>`          | Time range end (same format)                            |
-
-## Architecture
-
-```
-OTLP Ingestion (gRPC:4317 / HTTP:4318)
-        │
-    Store (in-memory)
-        │
-   ┌────┴────┐
-   │         │
-Query API   TUI
-(gRPC:4319)
-   │
-   └──── otel-cli view (remote TUI via Follow streams)
-```

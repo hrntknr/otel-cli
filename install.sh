@@ -21,11 +21,13 @@ detect_platform() {
         Linux)
             case "$ARCH" in
                 x86_64) TARGET="x86_64-unknown-linux-gnu" ;;
+                aarch64|arm64) TARGET="aarch64-unknown-linux-gnu" ;;
                 *) abort "Unsupported architecture: $ARCH" ;;
             esac
             ;;
         Darwin)
             case "$ARCH" in
+                x86_64) TARGET="x86_64-apple-darwin" ;;
                 arm64) TARGET="aarch64-apple-darwin" ;;
                 *) abort "Unsupported architecture: $ARCH" ;;
             esac
