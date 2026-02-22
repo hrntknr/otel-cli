@@ -601,7 +601,7 @@ fn generate_metrics(rng: &mut impl Rng, state: &mut MetricsState) -> Vec<Resourc
 }
 
 enum TelemetryItem {
-    Trace(ResourceSpans),
+    Trace(Vec<ResourceSpans>),
     Log(ResourceLogs),
     Metric(ResourceMetrics),
 }
@@ -609,14 +609,13 @@ enum TelemetryItem {
 impl std::fmt::Display for TelemetryItem {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            TelemetryItem::Trace(rs) => {
-                let name = rs
-                    .scope_spans
-                    .first()
-                    .and_then(|ss| ss.spans.first())
-                    .map(|s| s.name.as_str())
-                    .unwrap_or("?");
-                write!(f, "trace: {name}")
+            TelemetryItem::Trace(spans) => {
+                let count: usize = spans
+                    .iter()
+                    .flat_map(|rs| &rs.scope_spans)
+                    .map(|ss| ss.spans.len())
+                    .sum();
+                write!(f, "trace: {count} spans")
             }
             TelemetryItem::Log(rl) => {
                 let body = rl
@@ -651,10 +650,10 @@ async fn send_item(
     metrics_client: &mut MetricsServiceClient<Channel>,
 ) -> Result<()> {
     match item {
-        TelemetryItem::Trace(rs) => {
+        TelemetryItem::Trace(spans) => {
             trace_client
                 .export(ExportTraceServiceRequest {
-                    resource_spans: vec![rs.clone()],
+                    resource_spans: spans.clone(),
                 })
                 .await?;
         }
@@ -678,11 +677,7 @@ async fn send_item(
 
 fn generate_item(rng: &mut impl Rng, metrics_state: &mut MetricsState) -> TelemetryItem {
     match rng.random_range(0..3u8) {
-        0 => {
-            let spans = generate_traces(rng);
-            let idx = rng.random_range(0..spans.len());
-            TelemetryItem::Trace(spans.into_iter().nth(idx).unwrap())
-        }
+        0 => TelemetryItem::Trace(generate_traces(rng)),
         1 => TelemetryItem::Log(generate_log(rng)),
         _ => {
             let metrics = generate_metrics(rng, metrics_state);
