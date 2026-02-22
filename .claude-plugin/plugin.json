@@ -1,0 +1,8 @@
+{
+  "name": "otel-cli",
+  "description": "Inspects OpenTelemetry traces, logs, and metrics from a local OTLP server. Use when the user needs to debug distributed traces, inspect application logs, check metrics, or troubleshoot observability issues during development.",
+  "version": "0.0.1",
+  "author": {
+    "name": "hrntknr"
+  }
+}

@@ -1,0 +1,13 @@
+{
+  "name": "otel-cli",
+  "owner": {
+    "name": "hrntknr"
+  },
+  "plugins": [
+    {
+      "name": "otel-cli",
+      "source": "./",
+      "description": "Inspect OpenTelemetry traces, logs, and metrics from a local OTLP server. Query, filter, and follow telemetry data in real-time during development."
+    }
+  ]
+}
