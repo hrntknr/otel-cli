@@ -121,9 +121,12 @@ async fn test_query_traces_with_service_filter() {
         .await
         .unwrap();
 
-    let spans = response.into_inner().resource_spans;
-    assert_eq!(spans.len(), 1);
-    assert_eq!(spans[0].scope_spans[0].spans[0].name, "span-a");
+    let trace_groups = response.into_inner().trace_groups;
+    assert_eq!(trace_groups.len(), 1);
+    assert_eq!(
+        trace_groups[0].resource_spans[0].scope_spans[0].spans[0].name,
+        "span-a"
+    );
 }
 
 #[tokio::test]

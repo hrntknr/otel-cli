@@ -83,8 +83,15 @@ impl QueryServiceTrait for QueryGrpcService {
         };
         let limit = effective_limit(req.limit);
         let store = self.store.read().await;
-        let resource_spans = store.query_traces(&filter, limit);
-        Ok(Response::new(QueryTracesResponse { resource_spans }))
+        let groups = store.query_traces(&filter, limit);
+        let trace_groups = groups
+            .into_iter()
+            .map(|g| crate::proto::otelcli::query::v1::TraceGroup {
+                trace_id: g.trace_id,
+                resource_spans: g.resource_spans,
+            })
+            .collect();
+        Ok(Response::new(QueryTracesResponse { trace_groups }))
     }
 
     async fn query_logs(

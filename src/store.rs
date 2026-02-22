@@ -6,7 +6,7 @@ use crate::proto::opentelemetry::proto::{
     common::v1::{any_value, KeyValue},
     logs::v1::ResourceLogs,
     metrics::v1::{metric, ResourceMetrics},
-    trace::v1::ResourceSpans,
+    trace::v1::{ResourceSpans, ScopeSpans},
 };
 
 #[derive(Debug, Clone)]
@@ -19,8 +19,15 @@ pub enum StoreEvent {
     MetricsCleared,
 }
 
+#[derive(Clone)]
+pub struct TraceGroup {
+    pub trace_id: Vec<u8>,
+    pub resource_spans: Vec<ResourceSpans>,
+    sort_key: u64,
+}
+
 pub struct Store {
-    traces: VecDeque<ResourceSpans>,
+    traces: VecDeque<TraceGroup>,
     logs: VecDeque<ResourceLogs>,
     metrics: VecDeque<ResourceMetrics>,
     max_items: usize,
@@ -78,12 +85,65 @@ pub struct MetricFilter {
     pub metric_name: Option<String>,
 }
 
-fn trace_sort_key(rs: &ResourceSpans) -> u64 {
+fn rs_sort_key(rs: &ResourceSpans) -> u64 {
     rs.scope_spans
         .iter()
         .flat_map(|ss| ss.spans.iter().map(|s| s.start_time_unix_nano))
         .min()
         .unwrap_or(0)
+}
+
+/// Split a ResourceSpans into per-trace_id chunks.
+fn split_by_trace_id(rs: ResourceSpans) -> Vec<(Vec<u8>, ResourceSpans)> {
+    let mut trace_ids: Vec<Vec<u8>> = rs
+        .scope_spans
+        .iter()
+        .flat_map(|ss| ss.spans.iter().map(|s| s.trace_id.clone()))
+        .collect();
+    trace_ids.sort();
+    trace_ids.dedup();
+
+    // Fast path: single trace_id (most common case)
+    if trace_ids.len() <= 1 {
+        let trace_id = trace_ids.into_iter().next().unwrap_or_default();
+        return vec![(trace_id, rs)];
+    }
+
+    // Split ResourceSpans by trace_id
+    trace_ids
+        .into_iter()
+        .map(|tid| {
+            let scope_spans = rs
+                .scope_spans
+                .iter()
+                .filter_map(|ss| {
+                    let spans: Vec<_> = ss
+                        .spans
+                        .iter()
+                        .filter(|s| s.trace_id == tid)
+                        .cloned()
+                        .collect();
+                    if spans.is_empty() {
+                        None
+                    } else {
+                        Some(ScopeSpans {
+                            scope: ss.scope.clone(),
+                            spans,
+                            schema_url: ss.schema_url.clone(),
+                        })
+                    }
+                })
+                .collect();
+            (
+                tid,
+                ResourceSpans {
+                    resource: rs.resource.clone(),
+                    scope_spans,
+                    schema_url: rs.schema_url.clone(),
+                },
+            )
+        })
+        .collect()
 }
 
 pub fn log_sort_key_pub(rl: &ResourceLogs) -> u64 {
@@ -309,12 +369,33 @@ impl Store {
 
     pub fn insert_traces(&mut self, resource_spans: Vec<ResourceSpans>) {
         for rs in resource_spans {
-            let ts = trace_sort_key(&rs);
-            let pos = sorted_insert_pos(&self.traces, ts, trace_sort_key);
-            self.traces.insert(pos, rs);
-            if self.traces.len() > self.max_items {
-                self.traces.pop_front();
+            for (trace_id, split_rs) in split_by_trace_id(rs) {
+                let ts = rs_sort_key(&split_rs);
+                if let Some(idx) = self.traces.iter().position(|g| g.trace_id == trace_id) {
+                    let pos = self.traces[idx]
+                        .resource_spans
+                        .partition_point(|rs| rs_sort_key(rs) <= ts);
+                    self.traces[idx].resource_spans.insert(pos, split_rs);
+                    if ts < self.traces[idx].sort_key {
+                        self.traces[idx].sort_key = ts;
+                        let group = self.traces.remove(idx).unwrap();
+                        let new_pos =
+                            sorted_insert_pos(&self.traces, group.sort_key, |g| g.sort_key);
+                        self.traces.insert(new_pos, group);
+                    }
+                } else {
+                    let group = TraceGroup {
+                        trace_id,
+                        resource_spans: vec![split_rs],
+                        sort_key: ts,
+                    };
+                    let pos = sorted_insert_pos(&self.traces, group.sort_key, |g| g.sort_key);
+                    self.traces.insert(pos, group);
+                }
             }
+        }
+        while self.traces.len() > self.max_items {
+            self.traces.pop_front();
         }
         let _ = self.event_tx.send(StoreEvent::TracesAdded);
     }
@@ -370,42 +451,42 @@ impl Store {
         self.metrics.len()
     }
 
-    pub fn query_traces(&self, filter: &TraceFilter, limit: usize) -> Vec<ResourceSpans> {
-        let mut result: Vec<_> = self
+    pub fn query_traces(&self, filter: &TraceFilter, limit: usize) -> Vec<TraceGroup> {
+        let mut groups: Vec<_> = self
             .traces
             .iter()
             .rev()
-            .filter(|rs| {
-                if let Some(ref service_name) = filter.service_name {
-                    let resource_attrs = rs
-                        .resource
-                        .as_ref()
-                        .map(|r| r.attributes.as_slice())
-                        .unwrap_or_default();
-                    if get_attribute_string(resource_attrs, "service.name").as_deref()
-                        != Some(service_name.as_str())
-                    {
+            .filter(|group| {
+                if let Some(ref trace_id_hex) = filter.trace_id {
+                    let expected_bytes = hex_decode(trace_id_hex);
+                    if group.trace_id != expected_bytes {
                         return false;
                     }
                 }
 
-                if let Some(ref trace_id_hex) = filter.trace_id {
-                    let expected_bytes = hex_decode(trace_id_hex);
-                    let has_matching_span = rs
-                        .scope_spans
-                        .iter()
-                        .any(|ss| ss.spans.iter().any(|span| span.trace_id == expected_bytes));
-                    if !has_matching_span {
+                if let Some(ref service_name) = filter.service_name {
+                    let has_service = group.resource_spans.iter().any(|rs| {
+                        let resource_attrs = rs
+                            .resource
+                            .as_ref()
+                            .map(|r| r.attributes.as_slice())
+                            .unwrap_or_default();
+                        get_attribute_string(resource_attrs, "service.name").as_deref()
+                            == Some(service_name.as_str())
+                    });
+                    if !has_service {
                         return false;
                     }
                 }
 
                 if !filter.attributes.is_empty() {
-                    let has_matching_attrs = rs.scope_spans.iter().any(|ss| {
-                        ss.spans.iter().any(|span| {
-                            filter.attributes.iter().all(|(key, value)| {
-                                get_attribute_string(&span.attributes, key).as_deref()
-                                    == Some(value.as_str())
+                    let has_matching_attrs = group.resource_spans.iter().any(|rs| {
+                        rs.scope_spans.iter().any(|ss| {
+                            ss.spans.iter().any(|span| {
+                                filter.attributes.iter().all(|(key, value)| {
+                                    get_attribute_string(&span.attributes, key).as_deref()
+                                        == Some(value.as_str())
+                                })
                             })
                         })
                     });
@@ -419,8 +500,8 @@ impl Store {
             .take(limit)
             .cloned()
             .collect();
-        result.reverse();
-        result
+        groups.reverse();
+        groups
     }
 
     pub fn query_logs(&self, filter: &LogFilter, limit: usize) -> Vec<ResourceLogs> {
@@ -708,7 +789,9 @@ mod tests {
     fn insert_and_query_traces() {
         let (mut store, _rx) = Store::new(100);
         store.insert_traces(vec![make_resource_spans("svc-a", &[1; 16], &[])]);
-        assert_eq!(store.query_traces(&TraceFilter::default(), 100).len(), 1);
+        let result = store.query_traces(&TraceFilter::default(), 100);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].resource_spans.len(), 1);
     }
 
     #[test]
@@ -737,8 +820,47 @@ mod tests {
         }
         let result = store.query_traces(&TraceFilter::default(), 100);
         assert_eq!(result.len(), 3);
-        let names: Vec<_> = result.iter().map(|rs| get_svc_name(rs)).collect();
+        let names: Vec<_> = result
+            .iter()
+            .map(|g| get_svc_name(&g.resource_spans[0]))
+            .collect();
         assert_eq!(names, vec!["svc-2", "svc-3", "svc-4"]);
+    }
+
+    #[test]
+    fn eviction_traces_by_trace_id() {
+        // max_items=2 means keep at most 2 unique traces
+        let (mut store, _rx) = Store::new(2);
+        // trace [1;16] has 2 ResourceSpans (counts as 1 trace)
+        store.insert_traces(vec![
+            make_resource_spans_full("svc-a", &[1; 16], &[], 100, 200),
+            make_resource_spans_full("svc-b", &[1; 16], &[], 200, 300),
+        ]);
+        // trace [2;16]: 2 unique traces now (at limit)
+        store.insert_traces(vec![make_resource_spans_full(
+            "svc-c",
+            &[2; 16],
+            &[],
+            300,
+            400,
+        )]);
+        // trace [3;16] triggers eviction (3 traces > max_items 2)
+        store.insert_traces(vec![make_resource_spans_full(
+            "svc-d",
+            &[3; 16],
+            &[],
+            400,
+            500,
+        )]);
+
+        let result = store.query_traces(&TraceFilter::default(), 100);
+        // trace [1;16] entirely evicted (both svc-a and svc-b removed)
+        assert_eq!(result.len(), 2);
+        let names: Vec<_> = result
+            .iter()
+            .map(|g| get_svc_name(&g.resource_spans[0]))
+            .collect();
+        assert_eq!(names, vec!["svc-c", "svc-d"]);
     }
 
     #[test]
@@ -795,7 +917,7 @@ mod tests {
         };
         let result = store.query_traces(&filter, 100);
         assert_eq!(result.len(), 1);
-        assert_eq!(result[0].scope_spans[0].spans[0].trace_id, trace_id_a);
+        assert_eq!(result[0].trace_id, trace_id_a);
     }
 
     #[test]
@@ -1043,7 +1165,13 @@ mod tests {
         )]);
 
         let result = store.query_traces(&TraceFilter::default(), 100);
-        let names: Vec<_> = result.iter().map(|rs| get_svc_name(rs)).collect();
+        // All three resource_spans are in the same trace group (same trace_id [0;16])
+        assert_eq!(result.len(), 1);
+        let names: Vec<_> = result[0]
+            .resource_spans
+            .iter()
+            .map(|rs| get_svc_name(rs))
+            .collect();
         assert_eq!(names, vec!["svc-100", "svc-200", "svc-300"]);
     }
 

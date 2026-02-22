@@ -22,7 +22,7 @@ use crate::proto::opentelemetry::proto::{
     trace::v1::ResourceSpans,
 };
 use crate::store::{
-    FilterCondition, FilterOperator, LogFilter, SeverityCondition, SharedStore, StoreEvent,
+    self, FilterCondition, FilterOperator, LogFilter, SeverityCondition, SharedStore, StoreEvent,
 };
 
 pub struct TraceSummary {
@@ -229,7 +229,7 @@ pub struct App {
     pub trace_summaries: Vec<TraceSummary>,
     pub timeline_spans: Vec<TimelineSpan>,
     pub timeline_table_state: TableState,
-    raw_traces: Vec<ResourceSpans>,
+    raw_traces: Vec<store::TraceGroup>,
     pub detail_panel_percent: u16,
     pub content_area: ratatui::layout::Rect,
     dragging_split: bool,
@@ -396,8 +396,12 @@ impl App {
                         if let Some(idx) = self.table_state.selected() {
                             if let Some(summary) = self.trace_summaries.get(idx) {
                                 let trace_id = summary.trace_id.clone();
-                                self.timeline_spans =
-                                    build_timeline_spans(&self.raw_traces, &trace_id);
+                                self.timeline_spans = self
+                                    .raw_traces
+                                    .iter()
+                                    .find(|g| client::hex_encode(&g.trace_id) == trace_id)
+                                    .map(|g| build_timeline_spans(&g.resource_spans))
+                                    .unwrap_or_default();
                                 self.timeline_table_state = TableState::default();
                                 if !self.timeline_spans.is_empty() {
                                     self.timeline_table_state.select(Some(0));
@@ -962,7 +966,12 @@ impl App {
 
         self.trace_count = self.trace_summaries.len();
         if let TraceView::Timeline(ref trace_id) = self.trace_view {
-            self.timeline_spans = build_timeline_spans(&self.raw_traces, trace_id);
+            self.timeline_spans = self
+                .raw_traces
+                .iter()
+                .find(|g| client::hex_encode(&g.trace_id) == *trace_id)
+                .map(|g| build_timeline_spans(&g.resource_spans))
+                .unwrap_or_default();
         }
 
         if self.current_tab == tabs::Tab::Traces && self.follow {
@@ -1058,7 +1067,6 @@ pub fn format_duration_ns(duration_ns: u64) -> String {
 }
 
 struct CollectedSpan {
-    trace_id: String,
     span_id: String,
     parent_span_id: String,
     service_name: String,
@@ -1075,7 +1083,6 @@ fn collect_all_spans(resource_spans: &[ResourceSpans]) -> Vec<CollectedSpan> {
         for ss in &rs.scope_spans {
             for span in &ss.spans {
                 spans.push(CollectedSpan {
-                    trace_id: client::hex_encode(&span.trace_id),
                     span_id: client::hex_encode(&span.span_id),
                     parent_span_id: client::hex_encode(&span.parent_span_id),
                     service_name: service_name.clone(),
@@ -1090,32 +1097,30 @@ fn collect_all_spans(resource_spans: &[ResourceSpans]) -> Vec<CollectedSpan> {
     spans
 }
 
-fn build_trace_summaries(resource_spans: &[ResourceSpans]) -> Vec<TraceSummary> {
-    let spans = collect_all_spans(resource_spans);
-
-    let mut grouped: HashMap<String, Vec<&CollectedSpan>> = HashMap::new();
-    for span in &spans {
-        grouped.entry(span.trace_id.clone()).or_default().push(span);
-    }
-
-    let mut summaries: Vec<TraceSummary> = grouped
-        .into_iter()
-        .map(|(trace_id, group)| {
-            let root = group.iter().find(|s| {
+fn build_trace_summaries(trace_groups: &[store::TraceGroup]) -> Vec<TraceSummary> {
+    let mut summaries: Vec<TraceSummary> = trace_groups
+        .iter()
+        .map(|group| {
+            let trace_id = client::hex_encode(&group.trace_id);
+            let spans = collect_all_spans(&group.resource_spans);
+            let root = spans.iter().find(|s| {
                 s.parent_span_id.chars().all(|c| c == '0') || s.parent_span_id.is_empty()
             });
             let (root_service, root_span_name) = match root {
                 Some(r) => (r.service_name.clone(), r.span_name.clone()),
-                None => (group[0].service_name.clone(), group[0].span_name.clone()),
+                None if !spans.is_empty() => {
+                    (spans[0].service_name.clone(), spans[0].span_name.clone())
+                }
+                None => (String::new(), String::new()),
             };
-            let min_start = group.iter().map(|s| s.start_ns).min().unwrap_or(0);
-            let max_end = group.iter().map(|s| s.end_ns).max().unwrap_or(0);
+            let min_start = spans.iter().map(|s| s.start_ns).min().unwrap_or(0);
+            let max_end = spans.iter().map(|s| s.end_ns).max().unwrap_or(0);
             let duration_ns = max_end.saturating_sub(min_start);
             TraceSummary {
                 trace_id,
                 root_service,
                 root_span_name,
-                span_count: group.len(),
+                span_count: spans.len(),
                 duration: format_duration_ns(duration_ns),
                 start_time: client::format_timestamp(min_start),
             }
@@ -1126,12 +1131,9 @@ fn build_trace_summaries(resource_spans: &[ResourceSpans]) -> Vec<TraceSummary> 
     summaries
 }
 
-fn build_timeline_spans(resource_spans: &[ResourceSpans], trace_id: &str) -> Vec<TimelineSpan> {
+fn build_timeline_spans(resource_spans: &[ResourceSpans]) -> Vec<TimelineSpan> {
     let all_spans = collect_all_spans(resource_spans);
-    let spans: Vec<&CollectedSpan> = all_spans
-        .iter()
-        .filter(|s| s.trace_id == trace_id)
-        .collect();
+    let spans: Vec<&CollectedSpan> = all_spans.iter().collect();
 
     if spans.is_empty() {
         return Vec::new();

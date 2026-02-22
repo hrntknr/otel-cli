@@ -113,10 +113,13 @@ async fn test_e2e_trace_query() {
         .await
         .unwrap();
 
-    let spans = response.into_inner().resource_spans;
-    assert!(!spans.is_empty(), "Expected non-empty trace results");
-    assert_eq!(spans[0].scope_spans[0].spans[0].name, "test-span");
-    assert_eq!(spans[0].scope_spans[0].spans[0].trace_id, vec![0xab; 16]);
+    let trace_groups = response.into_inner().trace_groups;
+    assert!(!trace_groups.is_empty(), "Expected non-empty trace results");
+    assert_eq!(
+        trace_groups[0].resource_spans[0].scope_spans[0].spans[0].name,
+        "test-span"
+    );
+    assert_eq!(trace_groups[0].trace_id, vec![0xab; 16]);
 }
 
 #[tokio::test]

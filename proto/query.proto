@@ -24,8 +24,13 @@ message QueryTracesRequest {
   int32 limit = 4;
 }
 
+message TraceGroup {
+  bytes trace_id = 1;
+  repeated opentelemetry.proto.trace.v1.ResourceSpans resource_spans = 2;
+}
+
 message QueryTracesResponse {
-  repeated opentelemetry.proto.trace.v1.ResourceSpans resource_spans = 1;
+  repeated TraceGroup trace_groups = 1;
 }
 
 message QueryLogsRequest {
