@@ -21,7 +21,7 @@ pub enum Commands {
         #[arg(long, default_value = "0.0.0.0:4319")]
         query_addr: String,
         /// Maximum items to keep in store
-        #[arg(long, default_value = "10000")]
+        #[arg(long, default_value = "1000")]
         max_items: usize,
         /// Run without TUI (headless mode)
         #[arg(long)]
@@ -146,7 +146,7 @@ mod tests {
                 assert_eq!(grpc_addr, "0.0.0.0:4317");
                 assert_eq!(http_addr, "0.0.0.0:4318");
                 assert_eq!(query_addr, "0.0.0.0:4319");
-                assert_eq!(max_items, 10000);
+                assert_eq!(max_items, 1000);
                 assert!(!no_tui);
             }
             _ => panic!("Expected Server command"),

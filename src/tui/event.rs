@@ -8,7 +8,7 @@ pub enum AppEvent {
     Key(KeyEvent),
     Mouse(MouseEvent),
     Resize,
-    StoreUpdate,
+    StoreUpdate(StoreEvent),
     Tick,
 }
 
@@ -56,7 +56,7 @@ impl EventHandler {
             tokio::select! {
                 result = self.store_rx.recv() => {
                     match result {
-                        Ok(_) => return AppEvent::StoreUpdate,
+                        Ok(event) => return AppEvent::StoreUpdate(event),
                         Err(broadcast::error::RecvError::Lagged(_)) => continue,
                         Err(_) => return AppEvent::Tick,
                     }
@@ -70,6 +70,25 @@ impl EventHandler {
                     }
                 }
             }
+        }
+    }
+
+    /// Non-blocking drain of queued events.
+    pub fn try_next(&mut self) -> Option<AppEvent> {
+        // Drain store events first
+        loop {
+            match self.store_rx.try_recv() {
+                Ok(event) => return Some(AppEvent::StoreUpdate(event)),
+                Err(broadcast::error::TryRecvError::Lagged(_)) => continue,
+                Err(_) => break,
+            }
+        }
+        // Then terminal events
+        match self.term_rx.try_recv() {
+            Ok(TermEvent::Key(key)) => Some(AppEvent::Key(key)),
+            Ok(TermEvent::Mouse(mouse)) => Some(AppEvent::Mouse(mouse)),
+            Ok(TermEvent::Resize) => Some(AppEvent::Resize),
+            Err(_) => None,
         }
     }
 }

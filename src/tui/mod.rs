@@ -238,6 +238,9 @@ pub struct App {
     pub available_log_fields: Vec<String>,
     pub available_resource_fields: Vec<String>,
     pending_refresh: bool,
+    dirty_traces: bool,
+    dirty_logs: bool,
+    dirty_metrics: bool,
     pub search_input: Option<String>,
     pub log_search: String,
     pub trace_search: String,
@@ -280,9 +283,20 @@ impl App {
             available_log_fields: Vec::new(),
             available_resource_fields: Vec::new(),
             pending_refresh: false,
+            dirty_traces: false,
+            dirty_logs: false,
+            dirty_metrics: false,
             search_input: None,
             log_search: String::new(),
             trace_search: String::new(),
+        }
+    }
+
+    fn mark_dirty(&mut self, event: StoreEvent) {
+        match event {
+            StoreEvent::TracesAdded | StoreEvent::TracesCleared => self.dirty_traces = true,
+            StoreEvent::LogsAdded | StoreEvent::LogsCleared => self.dirty_logs = true,
+            StoreEvent::MetricsAdded | StoreEvent::MetricsCleared => self.dirty_metrics = true,
         }
     }
 
@@ -290,17 +304,29 @@ impl App {
         mut self,
         terminal: &mut Terminal<B>,
     ) -> anyhow::Result<()> {
-        self.refresh_data().await;
+        self.refresh_data(true, true, true).await;
 
         loop {
             terminal.draw(|frame| ui::draw(frame, &mut self))?;
 
+            // Wait for next event
             match self.event_handler.next().await {
                 event::AppEvent::Key(key) => self.handle_key(key),
                 event::AppEvent::Mouse(mouse) => self.handle_mouse(mouse),
                 event::AppEvent::Resize => {}
-                event::AppEvent::StoreUpdate => self.refresh_data().await,
+                event::AppEvent::StoreUpdate(store_event) => self.mark_dirty(store_event),
                 event::AppEvent::Tick => {}
+            }
+
+            // Drain any queued events to coalesce updates
+            while let Some(event) = self.event_handler.try_next() {
+                match event {
+                    event::AppEvent::Key(key) => self.handle_key(key),
+                    event::AppEvent::Mouse(mouse) => self.handle_mouse(mouse),
+                    event::AppEvent::Resize => {}
+                    event::AppEvent::StoreUpdate(store_event) => self.mark_dirty(store_event),
+                    event::AppEvent::Tick => {}
+                }
             }
 
             if self.pending_clear {
@@ -310,7 +336,19 @@ impl App {
 
             if self.pending_refresh {
                 self.pending_refresh = false;
-                self.refresh_data().await;
+                self.dirty_traces = true;
+                self.dirty_logs = true;
+                self.dirty_metrics = true;
+            }
+
+            if self.dirty_traces || self.dirty_logs || self.dirty_metrics {
+                let t = self.dirty_traces;
+                let l = self.dirty_logs;
+                let m = self.dirty_metrics;
+                self.dirty_traces = false;
+                self.dirty_logs = false;
+                self.dirty_metrics = false;
+                self.refresh_data(t, l, m).await;
             }
 
             if self.should_quit {
@@ -929,89 +967,112 @@ impl App {
             self.trace_view = TraceView::List;
             self.timeline_table_state = TableState::default();
         }
-        self.refresh_data().await;
+        self.refresh_data(true, true, true).await;
     }
 
-    async fn refresh_data(&mut self) {
+    async fn refresh_data(
+        &mut self,
+        refresh_traces: bool,
+        refresh_logs: bool,
+        refresh_metrics: bool,
+    ) {
+        // Query store (read lock) — collect all needed data before dropping
         let store = self.store.read().await;
+        self.trace_count = store.trace_count();
         self.log_count = store.log_count();
         self.metric_count = store.metric_count();
 
-        let traces = store.query_traces(&Default::default(), 500);
-
-        // Fetch all logs for field collection, then apply filter
-        let all_logs = store.query_logs(&LogFilter::default(), 500);
-        let filtered_logs = if self.log_filter_condition_count() > 0 {
-            store.query_logs(&self.log_filter, 500)
+        let traces = if refresh_traces {
+            Some(store.query_traces(&Default::default(), usize::MAX))
         } else {
-            all_logs.clone()
+            None
         };
-
-        let metrics = store.query_metrics(&Default::default(), 500);
+        let (all_logs, filtered_logs) = if refresh_logs {
+            let all = store.query_logs(&LogFilter::default(), usize::MAX);
+            let filtered = if self.log_filter_condition_count() > 0 {
+                store.query_logs(&self.log_filter, usize::MAX)
+            } else {
+                all.clone()
+            };
+            (Some(all), Some(filtered))
+        } else {
+            (None, None)
+        };
+        let metrics = if refresh_metrics {
+            Some(store.query_metrics(&Default::default(), usize::MAX))
+        } else {
+            None
+        };
         drop(store);
 
-        self.raw_traces = traces;
-        self.trace_summaries = build_trace_summaries(&self.raw_traces);
+        // Process traces
+        if let Some(traces) = traces {
+            self.raw_traces = traces;
+            self.trace_summaries = build_trace_summaries(&self.raw_traces);
 
-        if !self.trace_search.is_empty() {
-            let needle = self.trace_search.to_ascii_lowercase();
-            self.trace_summaries.retain(|t| {
-                let line = format!(
-                    "{} {} {} {}",
-                    t.trace_id, t.root_service, t.root_span_name, t.duration
-                );
-                line.to_ascii_lowercase().contains(&needle)
-            });
-        }
+            if !self.trace_search.is_empty() {
+                let needle = self.trace_search.to_ascii_lowercase();
+                self.trace_summaries.retain(|t| {
+                    let line = format!(
+                        "{} {} {} {}",
+                        t.trace_id, t.root_service, t.root_span_name, t.duration
+                    );
+                    line.to_ascii_lowercase().contains(&needle)
+                });
+            }
+            if let TraceView::Timeline(ref trace_id) = self.trace_view {
+                self.timeline_spans = self
+                    .raw_traces
+                    .iter()
+                    .find(|g| client::hex_encode(&g.trace_id) == *trace_id)
+                    .map(|g| build_timeline_spans(&g.resource_spans))
+                    .unwrap_or_default();
+            }
 
-        self.trace_count = self.trace_summaries.len();
-        if let TraceView::Timeline(ref trace_id) = self.trace_view {
-            self.timeline_spans = self
-                .raw_traces
-                .iter()
-                .find(|g| client::hex_encode(&g.trace_id) == *trace_id)
-                .map(|g| build_timeline_spans(&g.resource_spans))
-                .unwrap_or_default();
-        }
-
-        if self.current_tab == tabs::Tab::Traces && self.follow {
-            if let TraceView::List = self.trace_view {
-                if !self.trace_summaries.is_empty() {
-                    self.table_state
-                        .select(Some(self.trace_summaries.len() - 1));
+            if self.current_tab == tabs::Tab::Traces && self.follow {
+                if let TraceView::List = self.trace_view {
+                    if !self.trace_summaries.is_empty() {
+                        self.table_state
+                            .select(Some(self.trace_summaries.len() - 1));
+                    }
                 }
             }
         }
 
-        // Collect available field names from all logs
-        self.update_available_fields(&all_logs);
+        // Process logs
+        if let (Some(all_logs), Some(filtered_logs)) = (all_logs, filtered_logs) {
+            self.update_available_fields(&all_logs);
 
-        let mut logs_data: Vec<LogRow> = filtered_logs
-            .into_iter()
-            .flat_map(|rl| convert_log_rows(&rl))
-            .collect();
+            let mut logs_data: Vec<LogRow> = filtered_logs
+                .into_iter()
+                .flat_map(|rl| convert_log_rows(&rl))
+                .collect();
 
-        if !self.log_search.is_empty() {
-            let needle = self.log_search.to_ascii_lowercase();
-            logs_data.retain(|row| {
-                let line = format!("{} {} {}", row.timestamp, row.severity, row.body);
-                line.to_ascii_lowercase().contains(&needle)
-            });
+            if !self.log_search.is_empty() {
+                let needle = self.log_search.to_ascii_lowercase();
+                logs_data.retain(|row| {
+                    let line = format!("{} {} {}", row.timestamp, row.severity, row.body);
+                    line.to_ascii_lowercase().contains(&needle)
+                });
+            }
+
+            self.logs_data = logs_data;
+
+            if self.current_tab == tabs::Tab::Logs && self.follow && !self.logs_data.is_empty() {
+                self.table_state.select(Some(self.logs_data.len() - 1));
+            }
         }
 
-        self.logs_data = logs_data;
+        // Process metrics
+        if let Some(metrics) = metrics {
+            self.metrics_data = build_metric_groups(&metrics);
 
-        if self.current_tab == tabs::Tab::Logs && self.follow && !self.logs_data.is_empty() {
-            self.table_state.select(Some(self.logs_data.len() - 1));
-        }
-
-        self.metrics_data = build_metric_groups(&metrics);
-
-        if self.current_tab == tabs::Tab::Metrics
-            && self.table_state.selected().is_none()
-            && !self.metrics_data.is_empty()
-        {
-            self.table_state.select(Some(0));
+            if self.current_tab == tabs::Tab::Metrics
+                && self.table_state.selected().is_none()
+                && !self.metrics_data.is_empty()
+            {
+                self.table_state.select(Some(0));
+            }
         }
     }
 
