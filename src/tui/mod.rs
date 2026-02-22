@@ -162,6 +162,10 @@ pub const ALL_OPERATORS: &[FilterOperator] = &[
     FilterOperator::Contains,
     FilterOperator::NotEq,
     FilterOperator::NotContains,
+    FilterOperator::Ge,
+    FilterOperator::Gt,
+    FilterOperator::Le,
+    FilterOperator::Lt,
 ];
 
 pub fn operator_symbol(op: &FilterOperator) -> &'static str {

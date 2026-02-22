@@ -163,15 +163,22 @@ fn sorted_insert_pos<T>(deque: &VecDeque<T>, target_key: u64, key_fn: impl Fn(&T
     lo
 }
 
-fn get_attribute_string(attributes: &[KeyValue], key: &str) -> Option<String> {
+fn get_attribute_value(attributes: &[KeyValue], key: &str) -> Option<any_value::Value> {
     attributes
         .iter()
         .find(|kv| kv.key == key)
         .and_then(|kv| kv.value.as_ref())
-        .and_then(|v| match &v.value {
-            Some(any_value::Value::StringValue(s)) => Some(s.clone()),
-            _ => None,
-        })
+        .and_then(|v| v.value.clone())
+}
+
+fn get_attribute_string(attributes: &[KeyValue], key: &str) -> Option<String> {
+    match get_attribute_value(attributes, key)? {
+        any_value::Value::StringValue(s) => Some(s),
+        any_value::Value::IntValue(n) => Some(n.to_string()),
+        any_value::Value::DoubleValue(f) => Some(f.to_string()),
+        any_value::Value::BoolValue(b) => Some(b.to_string()),
+        _ => None,
+    }
 }
 
 pub fn severity_text_to_number(text: &str) -> Option<i32> {
@@ -186,7 +193,59 @@ pub fn severity_text_to_number(text: &str) -> Option<i32> {
     }
 }
 
-fn matches_operator(value: &str, operator: &FilterOperator, pattern: &str) -> bool {
+fn matches_condition(
+    value: Option<&any_value::Value>,
+    operator: &FilterOperator,
+    pattern: &str,
+) -> bool {
+    match value {
+        Some(any_value::Value::IntValue(n)) => {
+            if let Ok(p) = pattern.parse::<f64>() {
+                return apply_ord_operator(*n as f64, operator, p);
+            }
+            false
+        }
+        Some(any_value::Value::DoubleValue(f)) => {
+            if let Ok(p) = pattern.parse::<f64>() {
+                return apply_ord_operator(*f, operator, p);
+            }
+            false
+        }
+        Some(any_value::Value::BoolValue(b)) => {
+            if let Ok(p) = pattern.parse::<bool>() {
+                match operator {
+                    FilterOperator::Eq => *b == p,
+                    FilterOperator::NotEq => *b != p,
+                    _ => false,
+                }
+            } else {
+                false
+            }
+        }
+        Some(any_value::Value::StringValue(s)) => matches_str_operator(s, operator, pattern),
+        _ => {
+            // No value found — only negative operators match
+            matches!(
+                operator,
+                FilterOperator::NotEq | FilterOperator::NotContains
+            )
+        }
+    }
+}
+
+fn apply_ord_operator<T: PartialOrd>(value: T, operator: &FilterOperator, pattern: T) -> bool {
+    match operator {
+        FilterOperator::Eq => value == pattern,
+        FilterOperator::NotEq => value != pattern,
+        FilterOperator::Ge => value >= pattern,
+        FilterOperator::Gt => value > pattern,
+        FilterOperator::Le => value <= pattern,
+        FilterOperator::Lt => value < pattern,
+        FilterOperator::Contains | FilterOperator::NotContains => false,
+    }
+}
+
+fn matches_str_operator(value: &str, operator: &FilterOperator, pattern: &str) -> bool {
     let (v, p) = (value.to_ascii_lowercase(), pattern.to_ascii_lowercase());
     match operator {
         FilterOperator::Eq => v == p,
@@ -400,8 +459,8 @@ impl Store {
 
                 // Resource conditions
                 for cond in &filter.resource_conditions {
-                    let val = get_attribute_string(resource_attrs, &cond.field).unwrap_or_default();
-                    if !matches_operator(&val, &cond.operator, &cond.value) {
+                    let val = get_attribute_value(resource_attrs, &cond.field);
+                    if !matches_condition(val.as_ref(), &cond.operator, &cond.value) {
                         return false;
                     }
                 }
@@ -418,9 +477,8 @@ impl Store {
 
                         // Attribute conditions
                         for cond in &filter.attribute_conditions {
-                            let val = get_attribute_string(&lr.attributes, &cond.field)
-                                .unwrap_or_default();
-                            if !matches_operator(&val, &cond.operator, &cond.value) {
+                            let val = get_attribute_value(&lr.attributes, &cond.field);
+                            if !matches_condition(val.as_ref(), &cond.operator, &cond.value) {
                                 return false;
                             }
                         }

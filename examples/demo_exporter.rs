@@ -28,9 +28,13 @@ struct Args {
     #[arg(long, default_value = "http://localhost:4317")]
     endpoint: String,
 
-    /// Send interval in milliseconds
-    #[arg(long, default_value_t = 1000)]
-    interval: u64,
+    /// Minimum send interval in milliseconds
+    #[arg(long, default_value_t = 50)]
+    min_interval: u64,
+
+    /// Maximum send interval in milliseconds
+    #[arg(long, default_value_t = 500)]
+    max_interval: u64,
 
     /// Send once and exit
     #[arg(long)]
@@ -454,42 +458,34 @@ fn severity_text(s: SeverityNumber) -> &'static str {
     }
 }
 
-fn generate_logs(rng: &mut impl Rng) -> Vec<ResourceLogs> {
+fn generate_log(rng: &mut impl Rng) -> ResourceLogs {
     let now = now_nanos();
-    // Pick 2-4 random log entries
-    let count = rng.random_range(2..=4);
-    let mut result: Vec<ResourceLogs> = Vec::new();
+    let idx = rng.random_range(0..LOG_TEMPLATES.len());
+    let def = &LOG_TEMPLATES[idx];
 
-    for _ in 0..count {
-        let idx = rng.random_range(0..LOG_TEMPLATES.len());
-        let def = &LOG_TEMPLATES[idx];
+    let record = LogRecord {
+        time_unix_nano: now,
+        observed_time_unix_nano: now,
+        severity_number: def.severity as i32,
+        severity_text: severity_text(def.severity).into(),
+        body: str_val(def.body),
+        attributes: log_attrs(def.attributes),
+        dropped_attributes_count: 0,
+        flags: 0,
+        trace_id: vec![],
+        span_id: vec![],
+        event_name: String::new(),
+    };
 
-        let record = LogRecord {
-            time_unix_nano: now,
-            observed_time_unix_nano: now,
-            severity_number: def.severity as i32,
-            severity_text: severity_text(def.severity).into(),
-            body: str_val(def.body),
-            attributes: log_attrs(def.attributes),
-            dropped_attributes_count: 0,
-            flags: 0,
-            trace_id: vec![],
-            span_id: vec![],
-            event_name: String::new(),
-        };
-
-        result.push(ResourceLogs {
-            resource: resource(def.service),
-            scope_logs: vec![ScopeLogs {
-                scope: scope(),
-                log_records: vec![record],
-                schema_url: String::new(),
-            }],
+    ResourceLogs {
+        resource: resource(def.service),
+        scope_logs: vec![ScopeLogs {
+            scope: scope(),
+            log_records: vec![record],
             schema_url: String::new(),
-        });
+        }],
+        schema_url: String::new(),
     }
-
-    result
 }
 
 /// Persistent state for metrics that accumulate across sends.
@@ -604,97 +600,137 @@ fn generate_metrics(rng: &mut impl Rng, state: &mut MetricsState) -> Vec<Resourc
     }]
 }
 
-async fn send_once(
+enum TelemetryItem {
+    Trace(ResourceSpans),
+    Log(ResourceLogs),
+    Metric(ResourceMetrics),
+}
+
+impl std::fmt::Display for TelemetryItem {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            TelemetryItem::Trace(rs) => {
+                let name = rs
+                    .scope_spans
+                    .first()
+                    .and_then(|ss| ss.spans.first())
+                    .map(|s| s.name.as_str())
+                    .unwrap_or("?");
+                write!(f, "trace: {name}")
+            }
+            TelemetryItem::Log(rl) => {
+                let body = rl
+                    .scope_logs
+                    .first()
+                    .and_then(|sl| sl.log_records.first())
+                    .and_then(|lr| lr.body.as_ref())
+                    .and_then(|v| match &v.value {
+                        Some(any_value::Value::StringValue(s)) => Some(s.as_str()),
+                        _ => None,
+                    })
+                    .unwrap_or("?");
+                write!(f, "log: {body}")
+            }
+            TelemetryItem::Metric(rm) => {
+                let name = rm
+                    .scope_metrics
+                    .first()
+                    .and_then(|sm| sm.metrics.first())
+                    .map(|m| m.name.as_str())
+                    .unwrap_or("?");
+                write!(f, "metric: {name}")
+            }
+        }
+    }
+}
+
+async fn send_item(
+    item: &TelemetryItem,
     trace_client: &mut TraceServiceClient<Channel>,
     logs_client: &mut LogsServiceClient<Channel>,
     metrics_client: &mut MetricsServiceClient<Channel>,
-    metrics_state: &mut MetricsState,
 ) -> Result<()> {
-    let mut rng = rand::rng();
-
-    let traces = generate_traces(&mut rng);
-    let logs = generate_logs(&mut rng);
-    let metrics = generate_metrics(&mut rng, metrics_state);
-
-    let span_count: usize = traces
-        .iter()
-        .flat_map(|rs| &rs.scope_spans)
-        .map(|ss| ss.spans.len())
-        .sum();
-    let log_count: usize = logs
-        .iter()
-        .flat_map(|rl| &rl.scope_logs)
-        .map(|sl| sl.log_records.len())
-        .sum();
-    let metric_count: usize = metrics
-        .iter()
-        .flat_map(|rm| &rm.scope_metrics)
-        .map(|sm| sm.metrics.len())
-        .sum();
-
-    trace_client
-        .export(ExportTraceServiceRequest {
-            resource_spans: traces,
-        })
-        .await?;
-    logs_client
-        .export(ExportLogsServiceRequest {
-            resource_logs: logs,
-        })
-        .await?;
-    metrics_client
-        .export(ExportMetricsServiceRequest {
-            resource_metrics: metrics,
-        })
-        .await?;
-
-    println!(
-        "Sent: {} spans, {} logs, {} metrics",
-        span_count, log_count, metric_count
-    );
-
+    match item {
+        TelemetryItem::Trace(rs) => {
+            trace_client
+                .export(ExportTraceServiceRequest {
+                    resource_spans: vec![rs.clone()],
+                })
+                .await?;
+        }
+        TelemetryItem::Log(rl) => {
+            logs_client
+                .export(ExportLogsServiceRequest {
+                    resource_logs: vec![rl.clone()],
+                })
+                .await?;
+        }
+        TelemetryItem::Metric(rm) => {
+            metrics_client
+                .export(ExportMetricsServiceRequest {
+                    resource_metrics: vec![rm.clone()],
+                })
+                .await?;
+        }
+    }
     Ok(())
+}
+
+fn generate_item(rng: &mut impl Rng, metrics_state: &mut MetricsState) -> TelemetryItem {
+    match rng.random_range(0..3u8) {
+        0 => {
+            let spans = generate_traces(rng);
+            let idx = rng.random_range(0..spans.len());
+            TelemetryItem::Trace(spans.into_iter().nth(idx).unwrap())
+        }
+        1 => TelemetryItem::Log(generate_log(rng)),
+        _ => {
+            let metrics = generate_metrics(rng, metrics_state);
+            TelemetryItem::Metric(metrics.into_iter().next().unwrap())
+        }
+    }
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
 
-    let trace_client = TraceServiceClient::connect(args.endpoint.clone()).await?;
-    let logs_client = LogsServiceClient::connect(args.endpoint.clone()).await?;
-    let metrics_client = MetricsServiceClient::connect(args.endpoint.clone()).await?;
-
-    // Clone into mutable bindings
-    let mut trace_client = trace_client;
-    let mut logs_client = logs_client;
-    let mut metrics_client = metrics_client;
+    let mut trace_client = TraceServiceClient::connect(args.endpoint.clone()).await?;
+    let mut logs_client = LogsServiceClient::connect(args.endpoint.clone()).await?;
+    let mut metrics_client = MetricsServiceClient::connect(args.endpoint.clone()).await?;
     let mut metrics_state = MetricsState::new();
+    let mut rng = rand::rng();
 
     if args.once {
-        send_once(
+        let item = generate_item(&mut rng, &mut metrics_state);
+        send_item(
+            &item,
             &mut trace_client,
             &mut logs_client,
             &mut metrics_client,
-            &mut metrics_state,
         )
         .await?;
+        println!("Sent: {item}");
     } else {
         println!(
-            "Sending demo telemetry to {} every {}ms (Ctrl+C to stop)",
-            args.endpoint, args.interval
+            "Sending demo telemetry to {} every {}..{}ms (Ctrl+C to stop)",
+            args.endpoint, args.min_interval, args.max_interval
         );
         loop {
-            if let Err(e) = send_once(
+            let item = generate_item(&mut rng, &mut metrics_state);
+            match send_item(
+                &item,
                 &mut trace_client,
                 &mut logs_client,
                 &mut metrics_client,
-                &mut metrics_state,
             )
             .await
             {
-                eprintln!("Error: {e}");
+                Ok(()) => println!("Sent: {item}"),
+                Err(e) => eprintln!("Error: {e}"),
             }
-            tokio::time::sleep(Duration::from_millis(args.interval)).await;
+            let delay = rng.random_range(args.min_interval..=args.max_interval);
+            tokio::time::sleep(Duration::from_millis(delay)).await;
         }
     }
 
