@@ -1,7 +1,27 @@
 use clap::{Parser, Subcommand};
 
 #[derive(Parser, Debug)]
-#[command(name = "otel-cli", version, about = "OTLP Server/Viewer CLI")]
+#[command(
+    name = "otel-cli",
+    version,
+    about = "OTLP Server/Viewer CLI",
+    long_about = "An in-memory OpenTelemetry (OTLP) server with querying and interactive TUI.\n\n\
+        Receive traces, logs, and metrics via standard OTLP protocols (gRPC/HTTP),\n\
+        store them in-memory, and inspect them interactively.",
+    after_long_help = "\
+Getting started:
+  $ otel-cli server                    Start server with interactive TUI
+  $ otel-cli server --no-tui           Start headless server
+
+Query data:
+  $ otel-cli trace                     List recent traces
+  $ otel-cli log --severity ERROR      Filter logs by severity
+  $ otel-cli metrics -f                Follow metrics in real-time
+
+Agent skill:
+  $ otel-cli skill-install              Install skill for current project
+  $ otel-cli skill-install --global    Install skill globally"
+)]
 pub struct Cli {
     #[command(subcommand)]
     pub command: Commands,
@@ -10,6 +30,12 @@ pub struct Cli {
 #[derive(Subcommand, Debug)]
 pub enum Commands {
     /// Start OTLP server with TUI viewer
+    #[command(after_long_help = "\
+Examples:
+  $ otel-cli server                              Interactive TUI mode
+  $ otel-cli server --no-tui                     Headless mode
+  $ otel-cli server --grpc-addr 0.0.0.0:5317     Custom gRPC port
+  $ otel-cli server --max-items 5000             Larger store capacity")]
     Server {
         /// gRPC listen address (OTLP collector)
         #[arg(long, default_value = "0.0.0.0:4317")]
@@ -28,6 +54,12 @@ pub enum Commands {
         no_tui: bool,
     },
     /// Query logs from server
+    #[command(after_long_help = "\
+Examples:
+  $ otel-cli log                                 List recent logs
+  $ otel-cli log --severity ERROR                Filter by severity
+  $ otel-cli log --service myapp -f              Follow logs for a service
+  $ otel-cli log --format json --since 10m       JSON output, last 10 minutes")]
     Log {
         /// Server address
         #[arg(long, default_value = "http://localhost:4319")]
@@ -58,6 +90,12 @@ pub enum Commands {
         until: Option<String>,
     },
     /// Query traces from server
+    #[command(after_long_help = "\
+Examples:
+  $ otel-cli trace                               List recent traces
+  $ otel-cli trace --trace-id abc123             Look up a specific trace
+  $ otel-cli trace --service myapp -f            Follow traces for a service
+  $ otel-cli trace -f --full                     Follow with full trace groups")]
     Trace {
         /// Server address
         #[arg(long, default_value = "http://localhost:4319")]
@@ -91,6 +129,11 @@ pub enum Commands {
         until: Option<String>,
     },
     /// Clear stored data on server
+    #[command(after_long_help = "\
+Examples:
+  $ otel-cli clear --traces --logs --metrics     Clear all data
+  $ otel-cli clear --traces                      Clear only traces
+  $ otel-cli clear --logs                        Clear only logs")]
     Clear {
         /// Server address
         #[arg(long, default_value = "http://localhost:4319")]
@@ -106,6 +149,11 @@ pub enum Commands {
         metrics: bool,
     },
     /// Attach to a running server and display TUI
+    #[command(after_long_help = "\
+Examples:
+  $ otel-cli view                                Attach to default server
+  $ otel-cli view --server http://remote:4319    Attach to remote server
+  $ otel-cli view --max-items 500                Custom local store capacity")]
     View {
         /// Query API server address
         #[arg(long, default_value = "http://localhost:4319")]
@@ -115,6 +163,12 @@ pub enum Commands {
         max_items: usize,
     },
     /// Query metrics from server
+    #[command(after_long_help = "\
+Examples:
+  $ otel-cli metrics                             List recent metrics
+  $ otel-cli metrics --name http_requests_total  Filter by metric name
+  $ otel-cli metrics --service myapp -f          Follow metrics for a service
+  $ otel-cli metrics --format json               JSON output")]
     Metrics {
         /// Server address
         #[arg(long, default_value = "http://localhost:4319")]
@@ -140,6 +194,20 @@ pub enum Commands {
         /// Show metrics until (e.g. 30s, 5m, 1h, 2d, or RFC3339)
         #[arg(long)]
         until: Option<String>,
+    },
+    /// Install agent skill for AI-assisted operation
+    #[command(after_long_help = "\
+Examples:
+  $ otel-cli skill-install                       Install for current project
+  $ otel-cli skill-install --global              Install globally (~/.claude/commands/)
+  $ otel-cli skill-install --force               Overwrite existing installation")]
+    SkillInstall {
+        /// Install to ~/.claude/commands/ (available in all projects)
+        #[arg(long)]
+        global: bool,
+        /// Force overwrite existing installation
+        #[arg(long)]
+        force: bool,
     },
 }
 
@@ -404,6 +472,30 @@ mod tests {
                 assert_eq!(attribute[0], ("query".to_string(), "a=b".to_string()));
             }
             _ => panic!("Expected Trace command"),
+        }
+    }
+
+    #[test]
+    fn skill_install_subcommand_parses_defaults() {
+        let cli = Cli::parse_from(["otel-cli", "skill-install"]);
+        match cli.command {
+            Commands::SkillInstall { global, force } => {
+                assert!(!global);
+                assert!(!force);
+            }
+            _ => panic!("Expected SkillInstall command"),
+        }
+    }
+
+    #[test]
+    fn skill_install_subcommand_parses_with_flags() {
+        let cli = Cli::parse_from(["otel-cli", "skill-install", "--global", "--force"]);
+        match cli.command {
+            Commands::SkillInstall { global, force } => {
+                assert!(global);
+                assert!(force);
+            }
+            _ => panic!("Expected SkillInstall command"),
         }
     }
 }

@@ -21,6 +21,8 @@ cargo run -- view                    # Attach TUI to a running server (default: 
 cargo run -- trace                   # Query traces
 cargo run -- log                     # Query logs
 cargo run -- metrics                 # Query metrics
+cargo run -- skill-install            # Install Claude Code skill for current project
+cargo run -- skill-install --global   # Install skill globally
 ```
 
 ## Architecture
@@ -31,7 +33,8 @@ cargo run -- metrics                 # Query metrics
 - **`src/server/`** — Three listeners: `otlp_grpc.rs` (standard OTLP TraceService/LogsService/MetricsService), `otlp_http.rs` (Axum `/v1/traces`, `/v1/logs`, `/v1/metrics`), `query_grpc.rs` (custom QueryService with streaming follow support).
 - **`src/client/`** — CLI query commands. Each submodule (trace, log, metrics, clear) builds gRPC requests and formats output (Text/JSON/TOON). `view.rs` connects to a running server's Follow streams and pipes data into a local Store to drive the TUI. `mod.rs` contains shared utilities: `hex_encode`, `parse_time_spec`, `format_attributes_json`, `format_timestamp`.
 - **`src/tui/`** — ratatui-based interactive UI with tabs for traces/logs/metrics. Uses broadcast channel events (`TracesAdded`, `LogsAdded`, etc.) for real-time updates. Dirty tracking for efficient refresh.
-- **`src/cli.rs`** — clap derive command definitions (Server, View, Trace, Log, Metrics, Clear).
+- **`src/install.rs`** — `install` subcommand logic. Embeds `skills/otel-cli/SKILL.md` via `include_str!` and writes it to the local project or `~/.claude/commands/` (with `--global`).
+- **`src/cli.rs`** — clap derive command definitions (Server, View, Trace, Log, Metrics, Clear, Install).
 - **`proto/query.proto`** — Custom query/follow/clear gRPC API. Standard OTLP protos are in `proto/opentelemetry-proto/` (git submodule).
 - **`build.rs`** — Compiles protobuf files via `tonic_prost_build`.
 

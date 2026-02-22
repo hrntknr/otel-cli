@@ -127,6 +127,10 @@ async fn main() -> anyhow::Result<()> {
             client::view::run_view(&server, max_items).await?;
             Ok(())
         }
+        Commands::SkillInstall { global, force } => {
+            otel_cli::install::run(global, force)?;
+            Ok(())
+        }
         Commands::Metrics {
             server,
             service,

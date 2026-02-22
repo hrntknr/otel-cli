@@ -24,6 +24,7 @@ crossterm = "0.29"
 serde_json = "1"
 anyhow = "1"
 bytes = "1"
+dirs = "6"
 chrono = { version = "0.4", features = ["serde"] }
 tokio-util = "0.7"
 tokio-stream = { version = "0.1", features = ["sync"] }
