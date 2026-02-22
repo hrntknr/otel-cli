@@ -147,7 +147,7 @@ impl QueryServiceTrait for QueryGrpcService {
 
                 let new_logs = {
                     let s = store.read().await;
-                    s.query_logs(&delta_filter, limit)
+                    s.query_logs(&delta_filter, usize::MAX)
                 };
 
                 if !new_logs.is_empty() {
