@@ -59,16 +59,17 @@ jobs:
           path: artifacts
       - name: Prepare release assets
         run: |
+          mkdir -p release
           cd artifacts
           for dir in otel-cli-*; do
             target="${dir#otel-cli-}"
             if [ -f "$dir/otel-cli.exe" ]; then
-              mv "$dir/otel-cli.exe" "otel-cli-${target}.exe"
+              mv "$dir/otel-cli.exe" "../release/otel-cli-${target}.exe"
             else
-              mv "$dir/otel-cli" "otel-cli-${target}"
+              mv "$dir/otel-cli" "../release/otel-cli-${target}"
             fi
           done
       - uses: softprops/action-gh-release@v2
         with:
-          files: artifacts/otel-cli-*
+          files: release/otel-cli-*
           generate_release_notes: true
