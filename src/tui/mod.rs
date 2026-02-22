@@ -835,7 +835,7 @@ impl App {
             MouseEventKind::Drag(crossterm::event::MouseButton::Left) => {
                 if self.dragging_split && area.width > 0 {
                     let relative_x = mouse.column.saturating_sub(area.x);
-                    let left_percent = (relative_x as u16 * 100) / area.width;
+                    let left_percent = (relative_x * 100) / area.width;
                     self.detail_panel_percent = left_percent.clamp(20, 80);
                     // detail_panel_percent is the right side, so invert
                     self.detail_panel_percent = 100 - left_percent.clamp(20, 80);
@@ -1194,20 +1194,19 @@ fn build_trace_summaries(trace_groups: &[store::TraceGroup]) -> Vec<TraceSummary
 
 fn build_timeline_spans(resource_spans: &[ResourceSpans]) -> Vec<TimelineSpan> {
     let all_spans = collect_all_spans(resource_spans);
-    let spans: Vec<&CollectedSpan> = all_spans.iter().collect();
 
-    if spans.is_empty() {
+    if all_spans.is_empty() {
         return Vec::new();
     }
 
     let span_ids: std::collections::HashSet<&str> =
-        spans.iter().map(|s| s.span_id.as_str()).collect();
+        all_spans.iter().map(|s| s.span_id.as_str()).collect();
 
     // Build parent -> children map
     let mut children_map: HashMap<&str, Vec<&CollectedSpan>> = HashMap::new();
     let mut roots: Vec<&CollectedSpan> = Vec::new();
 
-    for span in &spans {
+    for span in &all_spans {
         let is_root = span.parent_span_id.chars().all(|c| c == '0')
             || span.parent_span_id.is_empty()
             || !span_ids.contains(span.parent_span_id.as_str());
@@ -1305,8 +1304,8 @@ fn convert_log_rows(rl: &ResourceLogs) -> Vec<LogRow> {
 
 fn format_number_value(value: &Option<number_data_point::Value>) -> String {
     match value {
-        Some(number_data_point::Value::AsDouble(d)) => format!("{}", d),
-        Some(number_data_point::Value::AsInt(i)) => format!("{}", i),
+        Some(number_data_point::Value::AsDouble(d)) => d.to_string(),
+        Some(number_data_point::Value::AsInt(i)) => i.to_string(),
         None => "N/A".to_string(),
     }
 }

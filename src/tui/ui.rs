@@ -338,26 +338,25 @@ fn build_detail_lines(log: &LogRow) -> Vec<Line<'static>> {
         .add_modifier(Modifier::BOLD);
     let key_style = Style::default().fg(Color::DarkGray);
 
-    let mut lines: Vec<Line<'static>> = Vec::new();
-
-    // Metadata
-    lines.push(Line::from(Span::styled("Metadata", section_style)));
-    lines.push(Line::from(vec![
-        Span::styled("  Scope:      ", key_style),
-        Span::raw(log.service_name.clone()),
-    ]));
-    lines.push(Line::from(vec![
-        Span::styled("  Observed:   ", key_style),
-        Span::raw(log.timestamp.clone()),
-    ]));
-    lines.push(Line::from(vec![
-        Span::styled("  SevNumber:  ", key_style),
-        Span::raw(log.severity_number.to_string()),
-    ]));
-    lines.push(Line::from(vec![
-        Span::styled("  Body:       ", key_style),
-        Span::raw(log.body.clone()),
-    ]));
+    let mut lines: Vec<Line<'static>> = vec![
+        Line::from(Span::styled("Metadata", section_style)),
+        Line::from(vec![
+            Span::styled("  Scope:      ", key_style),
+            Span::raw(log.service_name.clone()),
+        ]),
+        Line::from(vec![
+            Span::styled("  Observed:   ", key_style),
+            Span::raw(log.timestamp.clone()),
+        ]),
+        Line::from(vec![
+            Span::styled("  SevNumber:  ", key_style),
+            Span::raw(log.severity_number.to_string()),
+        ]),
+        Line::from(vec![
+            Span::styled("  Body:       ", key_style),
+            Span::raw(log.body.clone()),
+        ]),
+    ];
     if !log.trace_id.is_empty() && log.trace_id != "00000000000000000000000000000000" {
         lines.push(Line::from(vec![
             Span::styled("  Trace ID:   ", key_style),

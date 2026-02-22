@@ -13,38 +13,18 @@ use super::{
 /// - Relative: `30s`, `5m`, `1h`, `2d` (interpreted as now - duration)
 /// - Absolute: RFC3339 string like `2024-01-01T00:00:00Z`
 pub fn parse_time_spec(s: &str) -> anyhow::Result<u64> {
-    // Try relative duration first
     let s_trimmed = s.trim();
-    if let Some(num_str) = s_trimmed.strip_suffix('s') {
-        if let Ok(n) = num_str.parse::<u64>() {
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)?
-                .as_nanos() as u64;
-            return Ok(now - n * 1_000_000_000);
-        }
-    }
-    if let Some(num_str) = s_trimmed.strip_suffix('m') {
-        if let Ok(n) = num_str.parse::<u64>() {
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)?
-                .as_nanos() as u64;
-            return Ok(now - n * 60 * 1_000_000_000);
-        }
-    }
-    if let Some(num_str) = s_trimmed.strip_suffix('h') {
-        if let Ok(n) = num_str.parse::<u64>() {
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)?
-                .as_nanos() as u64;
-            return Ok(now - n * 3600 * 1_000_000_000);
-        }
-    }
-    if let Some(num_str) = s_trimmed.strip_suffix('d') {
-        if let Ok(n) = num_str.parse::<u64>() {
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)?
-                .as_nanos() as u64;
-            return Ok(now - n * 86400 * 1_000_000_000);
+
+    // Try relative duration first
+    const UNITS: &[(char, u64)] = &[('s', 1), ('m', 60), ('h', 3600), ('d', 86400)];
+    for &(suffix, multiplier) in UNITS {
+        if let Some(num_str) = s_trimmed.strip_suffix(suffix) {
+            if let Ok(n) = num_str.parse::<u64>() {
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)?
+                    .as_nanos() as u64;
+                return Ok(now - n * multiplier * 1_000_000_000);
+            }
         }
     }
 
@@ -56,6 +36,33 @@ pub fn parse_time_spec(s: &str) -> anyhow::Result<u64> {
         .ok_or_else(|| anyhow::anyhow!("timestamp out of range: {}", s))? as u64)
 }
 
+fn build_query_request(
+    service: Option<String>,
+    severity: Option<String>,
+    attributes: Vec<(String, String)>,
+    limit: i32,
+    since: Option<String>,
+    until: Option<String>,
+) -> anyhow::Result<QueryLogsRequest> {
+    let start_time_unix_nano = match since {
+        Some(ref s) => parse_time_spec(s)?,
+        None => 0,
+    };
+    let end_time_unix_nano = match until {
+        Some(ref s) => parse_time_spec(s)?,
+        None => 0,
+    };
+    Ok(QueryLogsRequest {
+        service_name: service.unwrap_or_default(),
+        severity: severity.unwrap_or_default(),
+        attributes: attributes.into_iter().collect(),
+        limit,
+        start_time_unix_nano,
+        end_time_unix_nano,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
 pub async fn query_logs(
     server: &str,
     service: Option<String>,
@@ -67,25 +74,7 @@ pub async fn query_logs(
     until: Option<String>,
 ) -> anyhow::Result<()> {
     let mut client = QueryServiceClient::connect(server.to_string()).await?;
-
-    let start_time_unix_nano = match since {
-        Some(ref s) => parse_time_spec(s)?,
-        None => 0,
-    };
-    let end_time_unix_nano = match until {
-        Some(ref s) => parse_time_spec(s)?,
-        None => 0,
-    };
-
-    let request = QueryLogsRequest {
-        service_name: service.unwrap_or_default(),
-        severity: severity.unwrap_or_default(),
-        attributes: attributes.into_iter().collect(),
-        limit,
-        start_time_unix_nano,
-        end_time_unix_nano,
-    };
-
+    let request = build_query_request(service, severity, attributes, limit, since, until)?;
     let response = client.query_logs(request).await?.into_inner();
 
     match format {
@@ -103,6 +92,7 @@ pub async fn query_logs(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn follow_logs(
     server: &str,
     service: Option<String>,
@@ -114,25 +104,7 @@ pub async fn follow_logs(
     until: Option<String>,
 ) -> anyhow::Result<()> {
     let mut client = QueryServiceClient::connect(server.to_string()).await?;
-
-    let start_time_unix_nano = match since {
-        Some(ref s) => parse_time_spec(s)?,
-        None => 0,
-    };
-    let end_time_unix_nano = match until {
-        Some(ref s) => parse_time_spec(s)?,
-        None => 0,
-    };
-
-    let request = QueryLogsRequest {
-        service_name: service.unwrap_or_default(),
-        severity: severity.unwrap_or_default(),
-        attributes: attributes.into_iter().collect(),
-        limit,
-        start_time_unix_nano,
-        end_time_unix_nano,
-    };
-
+    let request = build_query_request(service, severity, attributes, limit, since, until)?;
     let mut stream = client.follow_logs(request).await?.into_inner();
 
     while let Some(msg) = stream.message().await? {
@@ -288,7 +260,7 @@ mod tests {
     #[test]
     fn parse_rfc3339() {
         let result = parse_time_spec("2024-01-01T00:00:00Z").unwrap();
-        assert_eq!(result, 1704067200_000_000_000);
+        assert_eq!(result, 1_704_067_200_000_000_000);
     }
 
     #[test]

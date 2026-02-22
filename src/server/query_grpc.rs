@@ -42,28 +42,34 @@ fn effective_limit(limit: i32) -> usize {
 }
 
 fn build_log_filter(req: &QueryLogsRequest) -> LogFilter {
-    let mut filter = LogFilter::default();
-    filter.service_name = non_empty(&req.service_name);
-    if let Some(sev) = non_empty(&req.severity) {
-        filter.severity = Some(SeverityCondition {
-            operator: FilterOperator::Ge,
-            value: sev,
-        });
-    }
-    for (k, v) in &req.attributes {
-        filter.attribute_conditions.push(FilterCondition {
+    let attribute_conditions = req
+        .attributes
+        .iter()
+        .map(|(k, v)| FilterCondition {
             field: k.clone(),
             operator: FilterOperator::Eq,
             value: v.clone(),
-        });
+        })
+        .collect();
+    LogFilter {
+        service_name: non_empty(&req.service_name),
+        severity: non_empty(&req.severity).map(|sev| SeverityCondition {
+            operator: FilterOperator::Ge,
+            value: sev,
+        }),
+        attribute_conditions,
+        start_time_ns: if req.start_time_unix_nano != 0 {
+            Some(req.start_time_unix_nano)
+        } else {
+            None
+        },
+        end_time_ns: if req.end_time_unix_nano != 0 {
+            Some(req.end_time_unix_nano)
+        } else {
+            None
+        },
+        ..Default::default()
     }
-    if req.start_time_unix_nano != 0 {
-        filter.start_time_ns = Some(req.start_time_unix_nano);
-    }
-    if req.end_time_unix_nano != 0 {
-        filter.end_time_ns = Some(req.end_time_unix_nano);
-    }
-    filter
 }
 
 #[tonic::async_trait]
@@ -124,7 +130,7 @@ impl QueryServiceTrait for QueryGrpcService {
         // Track the latest timestamp we've sent so we can send only newer logs
         let mut last_ts: u64 = initial_logs
             .iter()
-            .map(|rl| crate::store::log_sort_key_pub(rl))
+            .map(crate::store::log_sort_key)
             .max()
             .unwrap_or(0);
 
@@ -158,7 +164,7 @@ impl QueryServiceTrait for QueryGrpcService {
                 };
 
                 if !new_logs.is_empty() {
-                    if let Some(max_ts) = new_logs.iter().map(|rl| crate::store::log_sort_key_pub(rl)).max() {
+                    if let Some(max_ts) = new_logs.iter().map(crate::store::log_sort_key).max() {
                         last_ts = max_ts;
                     }
                     yield QueryLogsResponse { resource_logs: new_logs };

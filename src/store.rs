@@ -146,11 +146,7 @@ fn split_by_trace_id(rs: ResourceSpans) -> Vec<(Vec<u8>, ResourceSpans)> {
         .collect()
 }
 
-pub fn log_sort_key_pub(rl: &ResourceLogs) -> u64 {
-    log_sort_key(rl)
-}
-
-fn log_sort_key(rl: &ResourceLogs) -> u64 {
+pub fn log_sort_key(rl: &ResourceLogs) -> u64 {
     rl.scope_logs
         .iter()
         .flat_map(|sl| {
@@ -338,14 +334,13 @@ fn matches_severity(severity_number: i32, condition: &SeverityCondition) -> bool
     let Some(threshold) = severity_text_to_number(&condition.value) else {
         return false;
     };
-    let actual = severity_number;
     match condition.operator {
-        FilterOperator::Eq => actual == threshold,
-        FilterOperator::NotEq => actual != threshold,
-        FilterOperator::Ge => actual >= threshold,
-        FilterOperator::Gt => actual > threshold,
-        FilterOperator::Le => actual <= threshold,
-        FilterOperator::Lt => actual < threshold,
+        FilterOperator::Eq => severity_number == threshold,
+        FilterOperator::NotEq => severity_number != threshold,
+        FilterOperator::Ge => severity_number >= threshold,
+        FilterOperator::Gt => severity_number > threshold,
+        FilterOperator::Le => severity_number <= threshold,
+        FilterOperator::Lt => severity_number < threshold,
         _ => false,
     }
 }
@@ -568,10 +563,10 @@ impl Store {
                     })
                 });
 
-                if filter.severity.is_some() || !filter.attribute_conditions.is_empty() {
-                    if !has_matching_record {
-                        return false;
-                    }
+                if (filter.severity.is_some() || !filter.attribute_conditions.is_empty())
+                    && !has_matching_record
+                {
+                    return false;
                 }
 
                 true
@@ -1167,11 +1162,7 @@ mod tests {
         let result = store.query_traces(&TraceFilter::default(), 100);
         // All three resource_spans are in the same trace group (same trace_id [0;16])
         assert_eq!(result.len(), 1);
-        let names: Vec<_> = result[0]
-            .resource_spans
-            .iter()
-            .map(|rs| get_svc_name(rs))
-            .collect();
+        let names: Vec<_> = result[0].resource_spans.iter().map(get_svc_name).collect();
         assert_eq!(names, vec!["svc-100", "svc-200", "svc-300"]);
     }
 
@@ -1183,7 +1174,7 @@ mod tests {
         store.insert_logs(vec![make_resource_logs_full("svc-200", "INFO", &[], 200)]);
 
         let result = store.query_logs(&LogFilter::default(), 100);
-        let names: Vec<_> = result.iter().map(|rl| get_log_svc_name(rl)).collect();
+        let names: Vec<_> = result.iter().map(get_log_svc_name).collect();
         assert_eq!(names, vec!["svc-100", "svc-200", "svc-300"]);
     }
 
