@@ -4,6 +4,12 @@
 - Interactive TUI and CLI querying with filtering and follow mode
 - Agent skill lets AI coding agents query and debug observability data on your behalf
 
+<p align="center">
+  <img src="assets/otel-cli-trace.gif" width="32%" />
+  <img src="assets/otel-cli-log.gif" width="32%" />
+  <img src="assets/otel-cli-metrics.gif" width="32%" />
+</p>
+
 ## Installation
 
 ```bash
