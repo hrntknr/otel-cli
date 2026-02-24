@@ -24,7 +24,7 @@ otel-cli includes an agent skill that enables AI coding agents to start servers,
 otel-cli skill-install
 ```
 
-This installs the skill into your current project (`./skills/otel-cli/SKILL.md`). You can also install it globally so it is available across all projects:
+This installs the skill into your current project (`./.claude/skills/otel-cli/SKILL.md`). You can also install it globally so it is available across all projects:
 
 ```bash
 otel-cli skill-install --global

@@ -199,10 +199,10 @@ Examples:
     #[command(after_long_help = "\
 Examples:
   $ otel-cli skill-install                       Install for current project
-  $ otel-cli skill-install --global              Install globally (~/.claude/commands/)
+  $ otel-cli skill-install --global              Install globally (~/.claude/skills/)
   $ otel-cli skill-install --force               Overwrite existing installation")]
     SkillInstall {
-        /// Install to ~/.claude/commands/ (available in all projects)
+        /// Install to ~/.claude/skills/ (available in all projects)
         #[arg(long)]
         global: bool,
         /// Force overwrite existing installation

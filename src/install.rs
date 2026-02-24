@@ -8,9 +8,12 @@ const SKILL_CONTENT: &str = include_str!("../skills/otel-cli/SKILL.md");
 pub fn run(global: bool, force: bool) -> anyhow::Result<()> {
     let dest = if global {
         let home = dirs::home_dir().context("Could not determine home directory")?;
-        home.join(".claude").join("commands").join("otel-cli.md")
+        home.join(".claude")
+            .join("skills")
+            .join("otel-cli")
+            .join("SKILL.md")
     } else {
-        PathBuf::from("./skills/otel-cli/SKILL.md")
+        PathBuf::from("./.claude/skills/otel-cli/SKILL.md")
     };
 
     if dest.exists() && !force {
@@ -31,7 +34,7 @@ pub fn run(global: bool, force: bool) -> anyhow::Result<()> {
     let display_path = if global {
         dest.display().to_string()
     } else {
-        format!("./skills/otel-cli/SKILL.md")
+        format!("./.claude/skills/otel-cli/SKILL.md")
     };
 
     let line1 = "otel-cli skill installed successfully!";
@@ -74,7 +77,7 @@ mod tests {
     #[test]
     fn install_creates_file_in_target_directory() {
         let tmp = TempDir::new().unwrap();
-        let dest = tmp.path().join("skills/otel-cli/SKILL.md");
+        let dest = tmp.path().join(".claude/skills/otel-cli/SKILL.md");
 
         // Simulate the install logic with a custom path
         let parent = dest.parent().unwrap();
