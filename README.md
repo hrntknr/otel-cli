@@ -18,7 +18,18 @@ curl -fsSL https://raw.githubusercontent.com/hrntknr/otel-cli/main/install.sh | 
 
 ### Install agent skill
 
-otel-cli includes an agent skill that enables AI coding agents to start servers, query traces/logs/metrics, and debug observability issues on your behalf. Running `skill-install` places the skill definition where your agent can discover it.
+#### Option 1: Plugin marketplace
+
+```
+/plugin marketplace add hrntknr/otel-cli
+/plugin install otel-cli@otel-cli
+```
+
+The skill definition includes instructions for installing the `otel-cli` binary if it is not already available on your system.
+
+#### Option 2: Manual skill install
+
+Running `skill-install` places the skill definition where your agent can discover it.
 
 ```bash
 otel-cli skill-install

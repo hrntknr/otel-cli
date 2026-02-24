@@ -10,7 +10,11 @@ An in-memory OpenTelemetry (OTLP) server with querying capabilities. Use this sk
 
 ## Prerequisites
 
-The `otel-cli` binary must be available in PATH or built from source with `cargo build --release`.
+The `otel-cli` binary must be available in PATH. If it is not installed, run:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/hrntknr/otel-cli/main/install.sh | sh
+```
 
 ## Workflow
 
