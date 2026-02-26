@@ -490,44 +490,27 @@ fn generate_log(rng: &mut impl Rng) -> ResourceLogs {
 
 /// Persistent state for metrics that accumulate across sends.
 struct MetricsState {
-    request_count: i64,
+    request_count_get: i64,
+    request_count_post: i64,
     start_time_nanos: u64,
 }
 
 impl MetricsState {
     fn new() -> Self {
         Self {
-            request_count: 0,
+            request_count_get: 0,
+            request_count_post: 0,
             start_time_nanos: now_nanos(),
         }
     }
 }
 
-fn generate_metrics(rng: &mut impl Rng, state: &mut MetricsState) -> Vec<ResourceMetrics> {
-    let now = now_nanos();
-
-    // http.request.count — monotonic Sum
-    state.request_count += rng.random_range(1..=10);
-    let request_count = Metric {
-        name: "http.request.count".into(),
-        description: "Total number of HTTP requests".into(),
-        unit: "{request}".into(),
-        metadata: vec![],
-        data: Some(metric::Data::Sum(Sum {
-            data_points: vec![NumberDataPoint {
-                attributes: vec![kv("http.method", str_val("GET"))],
-                start_time_unix_nano: state.start_time_nanos,
-                time_unix_nano: now,
-                value: Some(number_data_point::Value::AsInt(state.request_count)),
-                exemplars: vec![],
-                flags: 0,
-            }],
-            aggregation_temporality: 2, // CUMULATIVE
-            is_monotonic: true,
-        })),
-    };
-
-    // http.request.duration — Histogram
+fn generate_histogram_dp(
+    rng: &mut impl Rng,
+    attributes: Vec<KeyValue>,
+    start_time: u64,
+    now: u64,
+) -> HistogramDataPoint {
     let sample_count: u64 = rng.random_range(5..=20);
     let bounds = vec![5.0, 10.0, 25.0, 50.0, 100.0, 250.0, 500.0, 1000.0];
     let mut bucket_counts = vec![0u64; bounds.len() + 1];
@@ -546,46 +529,114 @@ fn generate_metrics(rng: &mut impl Rng, state: &mut MetricsState) -> Vec<Resourc
         let bucket = bounds.iter().position(|&b| v <= b).unwrap_or(bounds.len());
         bucket_counts[bucket] += 1;
     }
+    HistogramDataPoint {
+        attributes,
+        start_time_unix_nano: start_time,
+        time_unix_nano: now,
+        count: sample_count,
+        sum: Some(sum),
+        bucket_counts,
+        explicit_bounds: bounds,
+        exemplars: vec![],
+        flags: 0,
+        min: Some(min),
+        max: Some(max),
+    }
+}
 
+fn generate_metrics(rng: &mut impl Rng, state: &mut MetricsState) -> Vec<ResourceMetrics> {
+    let now = now_nanos();
+
+    // http.request.count — monotonic Sum with multiple methods
+    state.request_count_get += rng.random_range(1..=10);
+    state.request_count_post += rng.random_range(1..=5);
+    let request_count = Metric {
+        name: "http.request.count".into(),
+        description: "Total number of HTTP requests".into(),
+        unit: "{request}".into(),
+        metadata: vec![],
+        data: Some(metric::Data::Sum(Sum {
+            data_points: vec![
+                NumberDataPoint {
+                    attributes: vec![kv("http.method", str_val("GET"))],
+                    start_time_unix_nano: state.start_time_nanos,
+                    time_unix_nano: now,
+                    value: Some(number_data_point::Value::AsInt(state.request_count_get)),
+                    exemplars: vec![],
+                    flags: 0,
+                },
+                NumberDataPoint {
+                    attributes: vec![kv("http.method", str_val("POST"))],
+                    start_time_unix_nano: state.start_time_nanos,
+                    time_unix_nano: now,
+                    value: Some(number_data_point::Value::AsInt(state.request_count_post)),
+                    exemplars: vec![],
+                    flags: 0,
+                },
+            ],
+            aggregation_temporality: 2, // CUMULATIVE
+            is_monotonic: true,
+        })),
+    };
+
+    // http.request.duration — Histogram with multiple methods
     let request_duration = Metric {
         name: "http.request.duration".into(),
         description: "HTTP request duration".into(),
         unit: "ms".into(),
         metadata: vec![],
         data: Some(metric::Data::Histogram(Histogram {
-            data_points: vec![HistogramDataPoint {
-                attributes: vec![kv("http.method", str_val("GET"))],
-                start_time_unix_nano: state.start_time_nanos,
-                time_unix_nano: now,
-                count: sample_count,
-                sum: Some(sum),
-                bucket_counts,
-                explicit_bounds: bounds,
-                exemplars: vec![],
-                flags: 0,
-                min: Some(min),
-                max: Some(max),
-            }],
+            data_points: vec![
+                generate_histogram_dp(
+                    rng,
+                    vec![kv("http.method", str_val("GET"))],
+                    state.start_time_nanos,
+                    now,
+                ),
+                generate_histogram_dp(
+                    rng,
+                    vec![kv("http.method", str_val("POST"))],
+                    state.start_time_nanos,
+                    now,
+                ),
+            ],
             aggregation_temporality: 2, // CUMULATIVE
         })),
     };
 
-    // system.cpu.usage — Gauge
-    let cpu: f64 = rng.random_range(10.0..90.0);
+    // system.cpu.usage — Gauge with multiple cores
+    let cpu0: f64 = rng.random_range(10.0..90.0);
+    let cpu1: f64 = rng.random_range(10.0..90.0);
     let cpu_usage = Metric {
         name: "system.cpu.usage".into(),
         description: "CPU usage percentage".into(),
         unit: "%".into(),
         metadata: vec![],
         data: Some(metric::Data::Gauge(Gauge {
-            data_points: vec![NumberDataPoint {
-                attributes: vec![kv("host.name", str_val("demo-host"))],
-                start_time_unix_nano: state.start_time_nanos,
-                time_unix_nano: now,
-                value: Some(number_data_point::Value::AsDouble(cpu)),
-                exemplars: vec![],
-                flags: 0,
-            }],
+            data_points: vec![
+                NumberDataPoint {
+                    attributes: vec![
+                        kv("host.name", str_val("demo-host")),
+                        kv("cpu", str_val("0")),
+                    ],
+                    start_time_unix_nano: state.start_time_nanos,
+                    time_unix_nano: now,
+                    value: Some(number_data_point::Value::AsDouble(cpu0)),
+                    exemplars: vec![],
+                    flags: 0,
+                },
+                NumberDataPoint {
+                    attributes: vec![
+                        kv("host.name", str_val("demo-host")),
+                        kv("cpu", str_val("1")),
+                    ],
+                    start_time_unix_nano: state.start_time_nanos,
+                    time_unix_nano: now,
+                    value: Some(number_data_point::Value::AsDouble(cpu1)),
+                    exemplars: vec![],
+                    flags: 0,
+                },
+            ],
         })),
     };
 

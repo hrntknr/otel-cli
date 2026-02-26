@@ -52,6 +52,18 @@ pub enum TraceView {
     Timeline(String),
 }
 
+#[derive(Default)]
+pub enum MetricView {
+    #[default]
+    List,
+    Chart(String),
+}
+
+pub struct ChartSeries {
+    pub label: String,
+    pub data: Vec<(f64, f64)>,
+}
+
 pub struct LogRow {
     pub timestamp: String,
     pub severity: String,
@@ -198,6 +210,8 @@ pub struct MetricDataPoint {
     pub timestamp: String,
     pub value: String,
     pub attributes: Vec<(String, String)>,
+    pub timestamp_ns: u64,
+    pub numeric_value: f64,
 }
 
 pub struct MetricGroup {
@@ -226,6 +240,8 @@ pub struct App {
     should_quit: bool,
     pending_clear: bool,
     pub trace_view: TraceView,
+    pub metric_view: MetricView,
+    pub chart_series: Vec<ChartSeries>,
     pub trace_summaries: Vec<TraceSummary>,
     pub timeline_spans: Vec<TimelineSpan>,
     pub timeline_table_state: TableState,
@@ -265,6 +281,8 @@ impl App {
             should_quit: false,
             pending_clear: false,
             trace_view: TraceView::default(),
+            metric_view: MetricView::default(),
+            chart_series: Vec::new(),
             trace_summaries: Vec::new(),
             timeline_spans: Vec::new(),
             timeline_table_state: TableState::default(),
@@ -428,7 +446,15 @@ impl App {
                 if self.current_tab == tabs::Tab::Logs {
                     self.log_detail_open = true;
                 } else if self.current_tab == tabs::Tab::Metrics {
-                    self.metric_detail_open = true;
+                    if let MetricView::List = self.metric_view {
+                        if let Some(idx) = self.table_state.selected() {
+                            if let Some(group) = self.metrics_data.get(idx) {
+                                let name = group.name.clone();
+                                self.chart_series = build_chart_series(group);
+                                self.metric_view = MetricView::Chart(name);
+                            }
+                        }
+                    }
                 } else if self.current_tab == tabs::Tab::Traces {
                     if let TraceView::List = self.trace_view {
                         if let Some(idx) = self.table_state.selected() {
@@ -474,6 +500,10 @@ impl App {
                     self.log_detail_open = false;
                 }
                 if self.current_tab == tabs::Tab::Metrics {
+                    if let MetricView::Chart(_) = self.metric_view {
+                        self.metric_view = MetricView::List;
+                        return;
+                    }
                     self.metric_detail_open = false;
                 }
             }
@@ -850,6 +880,7 @@ impl App {
         self.current_tab = tab;
         self.table_state = TableState::default();
         self.trace_view = TraceView::List;
+        self.metric_view = MetricView::List;
         if matches!(tab, tabs::Tab::Logs | tabs::Tab::Traces) {
             self.follow = true;
             self.follow_to_latest();
@@ -965,6 +996,10 @@ impl App {
             self.trace_view = TraceView::List;
             self.timeline_table_state = TableState::default();
         }
+        if self.current_tab == tabs::Tab::Metrics {
+            self.metric_view = MetricView::List;
+            self.chart_series = Vec::new();
+        }
         self.refresh_data(true, true, true).await;
     }
 
@@ -1064,6 +1099,15 @@ impl App {
         // Process metrics
         if let Some(metrics) = metrics {
             self.metrics_data = build_metric_groups(&metrics);
+
+            if let MetricView::Chart(ref name) = self.metric_view {
+                if let Some(group) = self.metrics_data.iter().find(|g| g.name == *name) {
+                    self.chart_series = build_chart_series(group);
+                } else {
+                    self.metric_view = MetricView::List;
+                    self.chart_series = Vec::new();
+                }
+            }
 
             if self.current_tab == tabs::Tab::Metrics
                 && self.table_state.selected().is_none()
@@ -1308,6 +1352,14 @@ fn format_number_value(value: &Option<number_data_point::Value>) -> String {
     }
 }
 
+fn number_value_as_f64(value: &Option<number_data_point::Value>) -> f64 {
+    match value {
+        Some(number_data_point::Value::AsDouble(d)) => *d,
+        Some(number_data_point::Value::AsInt(i)) => *i as f64,
+        None => 0.0,
+    }
+}
+
 fn metric_type_name(data: &Option<metric::Data>) -> &'static str {
     match data {
         Some(metric::Data::Gauge(_)) => "gauge",
@@ -1328,6 +1380,8 @@ fn extract_metric_data_points(data: &Option<metric::Data>) -> Vec<MetricDataPoin
                 timestamp: format_timestamp_time_only(dp.time_unix_nano),
                 value: format_number_value(&dp.value),
                 attributes: extract_kv_pairs(&dp.attributes),
+                timestamp_ns: dp.time_unix_nano,
+                numeric_value: number_value_as_f64(&dp.value),
             })
             .collect(),
         Some(metric::Data::Sum(s)) => s
@@ -1337,6 +1391,8 @@ fn extract_metric_data_points(data: &Option<metric::Data>) -> Vec<MetricDataPoin
                 timestamp: format_timestamp_time_only(dp.time_unix_nano),
                 value: format_number_value(&dp.value),
                 attributes: extract_kv_pairs(&dp.attributes),
+                timestamp_ns: dp.time_unix_nano,
+                numeric_value: number_value_as_f64(&dp.value),
             })
             .collect(),
         Some(metric::Data::Histogram(h)) => h
@@ -1348,6 +1404,8 @@ fn extract_metric_data_points(data: &Option<metric::Data>) -> Vec<MetricDataPoin
                     timestamp: format_timestamp_time_only(dp.time_unix_nano),
                     value: format!("count={} sum={}", dp.count, sum_str),
                     attributes: extract_kv_pairs(&dp.attributes),
+                    timestamp_ns: dp.time_unix_nano,
+                    numeric_value: dp.count as f64,
                 }
             })
             .collect(),
@@ -1360,6 +1418,8 @@ fn extract_metric_data_points(data: &Option<metric::Data>) -> Vec<MetricDataPoin
                     timestamp: format_timestamp_time_only(dp.time_unix_nano),
                     value: format!("count={} sum={}", dp.count, sum_str),
                     attributes: extract_kv_pairs(&dp.attributes),
+                    timestamp_ns: dp.time_unix_nano,
+                    numeric_value: dp.count as f64,
                 }
             })
             .collect(),
@@ -1381,11 +1441,57 @@ fn extract_metric_data_points(data: &Option<metric::Data>) -> Vec<MetricDataPoin
                     timestamp: format_timestamp_time_only(dp.time_unix_nano),
                     value: format!("count={} sum={}{}", dp.count, dp.sum, q_str),
                     attributes: extract_kv_pairs(&dp.attributes),
+                    timestamp_ns: dp.time_unix_nano,
+                    numeric_value: dp.count as f64,
                 }
             })
             .collect(),
         None => Vec::new(),
     }
+}
+
+fn build_chart_series(group: &MetricGroup) -> Vec<ChartSeries> {
+    let mut series_map: HashMap<String, Vec<(u64, f64)>> = HashMap::new();
+
+    for dp in &group.data_points {
+        let key = if dp.attributes.is_empty() {
+            "(all)".to_string()
+        } else {
+            dp.attributes
+                .iter()
+                .map(|(k, v)| format!("{}={}", k, v))
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        series_map
+            .entry(key)
+            .or_default()
+            .push((dp.timestamp_ns, dp.numeric_value));
+    }
+
+    let min_ts = series_map
+        .values()
+        .flat_map(|pts| pts.iter().map(|(t, _)| *t))
+        .min()
+        .unwrap_or(0);
+
+    let mut result: Vec<ChartSeries> = series_map
+        .into_iter()
+        .map(|(label, mut points)| {
+            points.sort_by_key(|(t, _)| *t);
+            let data = points
+                .iter()
+                .map(|(t, v)| {
+                    let relative_secs = (*t - min_ts) as f64 / 1_000_000_000.0;
+                    (relative_secs, *v)
+                })
+                .collect();
+            ChartSeries { label, data }
+        })
+        .collect();
+
+    result.sort_by(|a, b| a.label.cmp(&b.label));
+    result
 }
 
 fn build_metric_groups(resource_metrics: &[ResourceMetrics]) -> Vec<MetricGroup> {

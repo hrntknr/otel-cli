@@ -2,9 +2,11 @@ use ratatui::prelude::*;
 use ratatui::widgets::*;
 
 use super::tabs::Tab;
+use ratatui::symbols;
+
 use super::{
-    operator_label, operator_symbol, App, FilterPopupMode, LogRow, MetricGroup, TraceView,
-    ALL_OPERATORS, SEVERITY_LEVELS,
+    operator_label, operator_symbol, App, FilterPopupMode, LogRow, MetricGroup, MetricView,
+    TraceView, ALL_OPERATORS, SEVERITY_LEVELS,
 };
 
 pub fn draw(frame: &mut Frame, app: &mut App) {
@@ -38,7 +40,10 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
             TraceView::Timeline(_) => draw_traces_timeline(frame, chunks[1], app),
         },
         Tab::Logs => draw_logs_split(frame, chunks[1], app),
-        Tab::Metrics => draw_metrics_split(frame, chunks[1], app),
+        Tab::Metrics => match app.metric_view {
+            MetricView::List => draw_metrics_split(frame, chunks[1], app),
+            MetricView::Chart(_) => draw_metrics_chart(frame, chunks[1], app),
+        },
     }
 
     draw_status_bar(frame, chunks[2], app);
@@ -455,6 +460,105 @@ fn draw_metrics_split(frame: &mut Frame, area: Rect, app: &mut App) {
     }
 }
 
+fn draw_metrics_chart(frame: &mut Frame, area: Rect, app: &App) {
+    let title = match &app.metric_view {
+        MetricView::Chart(name) => format!("Chart: {}", name),
+        _ => "Chart".to_string(),
+    };
+
+    if app.chart_series.is_empty() || app.chart_series.iter().all(|s| s.data.is_empty()) {
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .title(format!("{} (no data)", title));
+        frame.render_widget(block, area);
+        return;
+    }
+
+    let x_min = app
+        .chart_series
+        .iter()
+        .flat_map(|s| s.data.iter().map(|(x, _)| *x))
+        .fold(f64::INFINITY, f64::min);
+    let x_max = app
+        .chart_series
+        .iter()
+        .flat_map(|s| s.data.iter().map(|(x, _)| *x))
+        .fold(f64::NEG_INFINITY, f64::max);
+    let y_min = app
+        .chart_series
+        .iter()
+        .flat_map(|s| s.data.iter().map(|(_, y)| *y))
+        .fold(f64::INFINITY, f64::min);
+    let y_max = app
+        .chart_series
+        .iter()
+        .flat_map(|s| s.data.iter().map(|(_, y)| *y))
+        .fold(f64::NEG_INFINITY, f64::max);
+
+    let y_range = y_max - y_min;
+    let y_pad = if y_range == 0.0 { 1.0 } else { y_range * 0.1 };
+    let y_lo = y_min - y_pad;
+    let y_hi = y_max + y_pad;
+
+    // Ensure x_max > x_min for chart rendering
+    let x_max = if x_max <= x_min { x_min + 1.0 } else { x_max };
+
+    let datasets: Vec<Dataset> = app
+        .chart_series
+        .iter()
+        .enumerate()
+        .map(|(i, series)| {
+            Dataset::default()
+                .name(series.label.clone())
+                .marker(symbols::Marker::Braille)
+                .graph_type(GraphType::Line)
+                .style(Style::default().fg(SERVICE_COLORS[i % SERVICE_COLORS.len()]))
+                .data(&series.data)
+        })
+        .collect();
+
+    let x_labels = vec![
+        Span::raw(format!("{:.0}s", x_min)),
+        Span::raw(format!("{:.0}s", (x_min + x_max) / 2.0)),
+        Span::raw(format!("{:.0}s", x_max)),
+    ];
+
+    let y_labels = vec![
+        Span::raw(format_chart_value(y_lo)),
+        Span::raw(format_chart_value((y_lo + y_hi) / 2.0)),
+        Span::raw(format_chart_value(y_hi)),
+    ];
+
+    let chart = Chart::new(datasets)
+        .block(Block::default().borders(Borders::ALL).title(title))
+        .x_axis(
+            Axis::default()
+                .title("Time")
+                .bounds([x_min, x_max])
+                .labels(x_labels),
+        )
+        .y_axis(
+            Axis::default()
+                .title("Value")
+                .bounds([y_lo, y_hi])
+                .labels(y_labels),
+        );
+
+    frame.render_widget(chart, area);
+}
+
+fn format_chart_value(v: f64) -> String {
+    if v.abs() >= 1_000_000.0 {
+        format!("{:.1}M", v / 1_000_000.0)
+    } else if v.abs() >= 1_000.0 {
+        format!("{:.1}K", v / 1_000.0)
+    } else if v.fract() == 0.0 {
+        format!("{:.0}", v)
+    } else {
+        format!("{:.2}", v)
+    }
+}
+
 fn draw_metric_detail_panel(frame: &mut Frame, area: Rect, group: &MetricGroup) {
     let section_style = Style::default()
         .fg(Color::Cyan)
@@ -595,14 +699,14 @@ fn draw_status_bar(frame: &mut Frame, area: Rect, app: &App) {
                 }
             }
         }
-        Tab::Metrics => {
-            let detail_str = if app.metric_detail_open {
-                "Esc:Close"
-            } else {
-                "Enter:Open"
-            };
-            format!("{} | c:Clear | q:Quit", detail_str)
-        }
+        Tab::Metrics => match app.metric_view {
+            MetricView::List => {
+                format!("Enter:Chart | c:Clear | q:Quit")
+            }
+            MetricView::Chart(_) => {
+                format!("Esc:Back | c:Clear | q:Quit")
+            }
+        },
     };
     let paragraph =
         Paragraph::new(status).style(Style::default().fg(Color::Black).bg(Color::White));
