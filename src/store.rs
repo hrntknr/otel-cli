@@ -3,7 +3,6 @@ use std::sync::Arc;
 use tokio::sync::{broadcast, RwLock};
 
 use crate::proto::opentelemetry::proto::{
-    common::v1::{any_value, KeyValue},
     logs::v1::ResourceLogs,
     metrics::v1::{metric, ResourceMetrics},
     trace::v1::{ResourceSpans, ScopeSpans},
@@ -38,58 +37,6 @@ pub struct Store {
 }
 
 pub type SharedStore = Arc<RwLock<Store>>;
-
-#[derive(Default)]
-pub struct TraceFilter {
-    pub service_name: Option<String>,
-    pub trace_id: Option<String>,
-    pub attributes: Vec<(String, String)>,
-    pub start_time_ns: Option<u64>,
-    pub end_time_ns: Option<u64>,
-}
-
-#[derive(Clone, Default, Debug, PartialEq, Eq)]
-pub enum FilterOperator {
-    #[default]
-    Eq,
-    Contains,
-    NotEq,
-    NotContains,
-    Ge,
-    Gt,
-    Le,
-    Lt,
-}
-
-#[derive(Clone, Debug)]
-pub struct FilterCondition {
-    pub field: String,
-    pub operator: FilterOperator,
-    pub value: String,
-}
-
-#[derive(Clone, Debug)]
-pub struct SeverityCondition {
-    pub operator: FilterOperator,
-    pub value: String,
-}
-
-#[derive(Default, Clone, Debug)]
-pub struct LogFilter {
-    pub severity: Option<SeverityCondition>,
-    pub attribute_conditions: Vec<FilterCondition>,
-    pub resource_conditions: Vec<FilterCondition>,
-    pub start_time_ns: Option<u64>,
-    pub end_time_ns: Option<u64>,
-}
-
-#[derive(Default)]
-pub struct MetricFilter {
-    pub service_name: Option<String>,
-    pub metric_name: Option<String>,
-    pub start_time_ns: Option<u64>,
-    pub end_time_ns: Option<u64>,
-}
 
 fn rs_sort_key(rs: &ResourceSpans) -> u64 {
     rs.scope_spans
@@ -225,24 +172,6 @@ fn sorted_insert_pos<T>(deque: &VecDeque<T>, target_key: u64, key_fn: impl Fn(&T
     lo
 }
 
-fn get_attribute_value(attributes: &[KeyValue], key: &str) -> Option<any_value::Value> {
-    attributes
-        .iter()
-        .find(|kv| kv.key == key)
-        .and_then(|kv| kv.value.as_ref())
-        .and_then(|v| v.value.clone())
-}
-
-fn get_attribute_string(attributes: &[KeyValue], key: &str) -> Option<String> {
-    match get_attribute_value(attributes, key)? {
-        any_value::Value::StringValue(s) => Some(s),
-        any_value::Value::IntValue(n) => Some(n.to_string()),
-        any_value::Value::DoubleValue(f) => Some(f.to_string()),
-        any_value::Value::BoolValue(b) => Some(b.to_string()),
-        _ => None,
-    }
-}
-
 pub fn severity_text_to_number(text: &str) -> Option<i32> {
     match text.to_ascii_uppercase().as_str() {
         "TRACE" => Some(1),
@@ -253,94 +182,6 @@ pub fn severity_text_to_number(text: &str) -> Option<i32> {
         "FATAL" => Some(21),
         _ => text.parse::<i32>().ok(),
     }
-}
-
-fn matches_condition(
-    value: Option<&any_value::Value>,
-    operator: &FilterOperator,
-    pattern: &str,
-) -> bool {
-    match value {
-        Some(any_value::Value::IntValue(n)) => {
-            if let Ok(p) = pattern.parse::<f64>() {
-                return apply_ord_operator(*n as f64, operator, p);
-            }
-            false
-        }
-        Some(any_value::Value::DoubleValue(f)) => {
-            if let Ok(p) = pattern.parse::<f64>() {
-                return apply_ord_operator(*f, operator, p);
-            }
-            false
-        }
-        Some(any_value::Value::BoolValue(b)) => {
-            if let Ok(p) = pattern.parse::<bool>() {
-                match operator {
-                    FilterOperator::Eq => *b == p,
-                    FilterOperator::NotEq => *b != p,
-                    _ => false,
-                }
-            } else {
-                false
-            }
-        }
-        Some(any_value::Value::StringValue(s)) => matches_str_operator(s, operator, pattern),
-        _ => {
-            // No value found — only negative operators match
-            matches!(
-                operator,
-                FilterOperator::NotEq | FilterOperator::NotContains
-            )
-        }
-    }
-}
-
-fn apply_ord_operator<T: PartialOrd>(value: T, operator: &FilterOperator, pattern: T) -> bool {
-    match operator {
-        FilterOperator::Eq => value == pattern,
-        FilterOperator::NotEq => value != pattern,
-        FilterOperator::Ge => value >= pattern,
-        FilterOperator::Gt => value > pattern,
-        FilterOperator::Le => value <= pattern,
-        FilterOperator::Lt => value < pattern,
-        FilterOperator::Contains | FilterOperator::NotContains => false,
-    }
-}
-
-fn matches_str_operator(value: &str, operator: &FilterOperator, pattern: &str) -> bool {
-    let (v, p) = (value.to_ascii_lowercase(), pattern.to_ascii_lowercase());
-    match operator {
-        FilterOperator::Eq => v == p,
-        FilterOperator::Contains => v.contains(&p),
-        FilterOperator::NotEq => v != p,
-        FilterOperator::NotContains => !v.contains(&p),
-        FilterOperator::Ge | FilterOperator::Gt | FilterOperator::Le | FilterOperator::Lt => {
-            if let (Ok(vn), Ok(pn)) = (v.parse::<f64>(), p.parse::<f64>()) {
-                match operator {
-                    FilterOperator::Ge => vn >= pn,
-                    FilterOperator::Gt => vn > pn,
-                    FilterOperator::Le => vn <= pn,
-                    FilterOperator::Lt => vn < pn,
-                    _ => unreachable!(),
-                }
-            } else {
-                match operator {
-                    FilterOperator::Ge => v >= p,
-                    FilterOperator::Gt => v > p,
-                    FilterOperator::Le => v <= p,
-                    FilterOperator::Lt => v < p,
-                    _ => unreachable!(),
-                }
-            }
-        }
-    }
-}
-
-fn matches_severity(severity_number: i32, condition: &SeverityCondition) -> bool {
-    let Some(threshold) = severity_text_to_number(&condition.value) else {
-        return false;
-    };
-    apply_ord_operator(severity_number, &condition.operator, threshold)
 }
 
 impl Store {
@@ -359,6 +200,18 @@ impl Store {
 
     pub fn subscribe(&self) -> broadcast::Receiver<StoreEvent> {
         self.event_tx.subscribe()
+    }
+
+    pub fn all_traces(&self) -> &VecDeque<TraceGroup> {
+        &self.traces
+    }
+
+    pub fn all_logs(&self) -> &VecDeque<ResourceLogs> {
+        &self.logs
+    }
+
+    pub fn all_metrics(&self) -> &VecDeque<ResourceMetrics> {
+        &self.metrics
     }
 
     pub fn insert_traces(&mut self, resource_spans: Vec<ResourceSpans>) {
@@ -451,56 +304,11 @@ impl Store {
         self.metrics.len()
     }
 
-    pub fn query_traces(&self, filter: &TraceFilter, limit: usize) -> Vec<TraceGroup> {
-        let mut groups: Vec<_> = self
-            .traces
-            .iter()
-            .rev()
-            .filter(|group| matches_trace_filter(group, filter))
-            .take(limit)
-            .cloned()
-            .collect();
-        groups.reverse();
-        groups
-    }
-
-    pub fn query_traces_since_version(
-        &self,
-        filter: &TraceFilter,
-        min_version: u64,
-    ) -> Vec<TraceGroup> {
+    pub fn query_traces_since_version(&self, min_version: u64) -> Vec<TraceGroup> {
         self.traces
             .iter()
-            .filter(|group| group.version > min_version && matches_trace_filter(group, filter))
+            .filter(|group| group.version > min_version)
             .cloned()
-            .collect()
-    }
-
-    pub fn query_traces_delta_since_version(
-        &self,
-        filter: &TraceFilter,
-        min_version: u64,
-    ) -> Vec<TraceGroup> {
-        self.traces
-            .iter()
-            .filter(|group| group.version > min_version && matches_trace_filter(group, filter))
-            .map(|group| {
-                let mut rs = Vec::new();
-                let mut vers = Vec::new();
-                for (i, v) in group.rs_versions.iter().enumerate() {
-                    if *v > min_version {
-                        rs.push(group.resource_spans[i].clone());
-                        vers.push(*v);
-                    }
-                }
-                TraceGroup {
-                    trace_id: group.trace_id.clone(),
-                    resource_spans: rs,
-                    rs_versions: vers,
-                    sort_key: group.sort_key,
-                    version: group.version,
-                }
-            })
             .collect()
     }
 
@@ -508,190 +316,26 @@ impl Store {
         self.trace_version
     }
 
-    pub fn query_logs(&self, filter: &LogFilter, limit: usize) -> Vec<ResourceLogs> {
-        let mut result: Vec<_> = self
-            .logs
+    pub fn query_logs_since(&self, min_ts: u64) -> Vec<ResourceLogs> {
+        self.logs
             .iter()
-            .rev()
-            .filter(|rl| {
-                let resource_attrs = rl
-                    .resource
-                    .as_ref()
-                    .map(|r| r.attributes.as_slice())
-                    .unwrap_or_default();
-
-                // Time range filter
-                let ts = log_sort_key(rl);
-                if let Some(start) = filter.start_time_ns {
-                    if ts < start {
-                        return false;
-                    }
-                }
-                if let Some(end) = filter.end_time_ns {
-                    if ts > end {
-                        return false;
-                    }
-                }
-
-                // Resource conditions
-                for cond in &filter.resource_conditions {
-                    let val = get_attribute_value(resource_attrs, &cond.field);
-                    if !matches_condition(val.as_ref(), &cond.operator, &cond.value) {
-                        return false;
-                    }
-                }
-
-                // Severity and attribute conditions apply per log record
-                let has_matching_record = rl.scope_logs.iter().any(|sl| {
-                    sl.log_records.iter().any(|lr| {
-                        // Severity
-                        if let Some(ref sev) = filter.severity {
-                            if !matches_severity(lr.severity_number, sev) {
-                                return false;
-                            }
-                        }
-
-                        // Attribute conditions
-                        for cond in &filter.attribute_conditions {
-                            let val = get_attribute_value(&lr.attributes, &cond.field);
-                            if !matches_condition(val.as_ref(), &cond.operator, &cond.value) {
-                                return false;
-                            }
-                        }
-
-                        true
-                    })
-                });
-
-                if (filter.severity.is_some() || !filter.attribute_conditions.is_empty())
-                    && !has_matching_record
-                {
-                    return false;
-                }
-
-                true
-            })
-            .take(limit)
+            .filter(|rl| log_sort_key(rl) >= min_ts)
             .cloned()
-            .collect();
-        result.reverse();
-        result
+            .collect()
     }
 
-    pub fn query_metrics(&self, filter: &MetricFilter, limit: usize) -> Vec<ResourceMetrics> {
-        let mut result: Vec<_> = self
-            .metrics
+    pub fn query_metrics_since(&self, min_ts: u64) -> Vec<ResourceMetrics> {
+        self.metrics
             .iter()
-            .rev()
-            .filter(|rm| {
-                let ts = metric_sort_key(rm);
-                if let Some(start) = filter.start_time_ns {
-                    if ts < start {
-                        return false;
-                    }
-                }
-                if let Some(end) = filter.end_time_ns {
-                    if ts > end {
-                        return false;
-                    }
-                }
-
-                if let Some(ref service_name) = filter.service_name {
-                    let resource_attrs = rm
-                        .resource
-                        .as_ref()
-                        .map(|r| r.attributes.as_slice())
-                        .unwrap_or_default();
-                    if get_attribute_string(resource_attrs, "service.name").as_deref()
-                        != Some(service_name.as_str())
-                    {
-                        return false;
-                    }
-                }
-
-                if let Some(ref metric_name) = filter.metric_name {
-                    let has_matching_name = rm
-                        .scope_metrics
-                        .iter()
-                        .any(|sm| sm.metrics.iter().any(|m| m.name == *metric_name));
-                    if !has_matching_name {
-                        return false;
-                    }
-                }
-
-                true
-            })
-            .take(limit)
+            .filter(|rm| metric_sort_key(rm) >= min_ts)
             .cloned()
-            .collect();
-        result.reverse();
-        result
+            .collect()
     }
 }
 
 pub fn new_shared(max_items: usize) -> (SharedStore, broadcast::Receiver<StoreEvent>) {
     let (store, rx) = Store::new(max_items);
     (Arc::new(RwLock::new(store)), rx)
-}
-
-fn matches_trace_filter(group: &TraceGroup, filter: &TraceFilter) -> bool {
-    if let Some(start) = filter.start_time_ns {
-        if group.sort_key < start {
-            return false;
-        }
-    }
-    if let Some(end) = filter.end_time_ns {
-        if group.sort_key > end {
-            return false;
-        }
-    }
-
-    if let Some(ref trace_id_hex) = filter.trace_id {
-        let expected_bytes = hex_decode(trace_id_hex);
-        if group.trace_id != expected_bytes {
-            return false;
-        }
-    }
-
-    if let Some(ref service_name) = filter.service_name {
-        let has_service = group.resource_spans.iter().any(|rs| {
-            let resource_attrs = rs
-                .resource
-                .as_ref()
-                .map(|r| r.attributes.as_slice())
-                .unwrap_or_default();
-            get_attribute_string(resource_attrs, "service.name").as_deref()
-                == Some(service_name.as_str())
-        });
-        if !has_service {
-            return false;
-        }
-    }
-
-    if !filter.attributes.is_empty() {
-        let has_matching_attrs = group.resource_spans.iter().any(|rs| {
-            rs.scope_spans.iter().any(|ss| {
-                ss.spans.iter().any(|span| {
-                    filter.attributes.iter().all(|(key, value)| {
-                        get_attribute_string(&span.attributes, key).as_deref()
-                            == Some(value.as_str())
-                    })
-                })
-            })
-        });
-        if !has_matching_attrs {
-            return false;
-        }
-    }
-
-    true
-}
-
-fn hex_decode(s: &str) -> Vec<u8> {
-    (0..s.len())
-        .step_by(2)
-        .map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap_or(0))
-        .collect()
 }
 
 #[cfg(test)]
@@ -824,48 +468,41 @@ mod tests {
     }
 
     fn get_svc_name(rs: &ResourceSpans) -> String {
-        get_attribute_string(
-            rs.resource
-                .as_ref()
-                .map(|r| r.attributes.as_slice())
-                .unwrap_or_default(),
-            "service.name",
-        )
-        .unwrap()
-    }
-
-    fn get_log_svc_name(rl: &ResourceLogs) -> String {
-        get_attribute_string(
-            rl.resource
-                .as_ref()
-                .map(|r| r.attributes.as_slice())
-                .unwrap_or_default(),
-            "service.name",
-        )
-        .unwrap()
+        rs.resource
+            .as_ref()
+            .and_then(|r| {
+                r.attributes
+                    .iter()
+                    .find(|kv| kv.key == "service.name")
+                    .and_then(|kv| kv.value.as_ref())
+                    .and_then(|v| match &v.value {
+                        Some(any_value::Value::StringValue(s)) => Some(s.clone()),
+                        _ => None,
+                    })
+            })
+            .unwrap()
     }
 
     #[test]
-    fn insert_and_query_traces() {
+    fn insert_and_all_traces() {
         let (mut store, _rx) = Store::new(100);
         store.insert_traces(vec![make_resource_spans("svc-a", &[1; 16], &[])]);
-        let result = store.query_traces(&TraceFilter::default(), 100);
-        assert_eq!(result.len(), 1);
-        assert_eq!(result[0].resource_spans.len(), 1);
+        assert_eq!(store.all_traces().len(), 1);
+        assert_eq!(store.all_traces()[0].resource_spans.len(), 1);
     }
 
     #[test]
-    fn insert_and_query_logs() {
+    fn insert_and_all_logs() {
         let (mut store, _rx) = Store::new(100);
         store.insert_logs(vec![make_resource_logs("svc-a", "INFO", &[])]);
-        assert_eq!(store.query_logs(&LogFilter::default(), 100).len(), 1);
+        assert_eq!(store.all_logs().len(), 1);
     }
 
     #[test]
-    fn insert_and_query_metrics() {
+    fn insert_and_all_metrics() {
         let (mut store, _rx) = Store::new(100);
         store.insert_metrics(vec![make_resource_metrics("svc-a", "http.duration")]);
-        assert_eq!(store.query_metrics(&MetricFilter::default(), 100).len(), 1);
+        assert_eq!(store.all_metrics().len(), 1);
     }
 
     #[test]
@@ -878,9 +515,9 @@ mod tests {
                 &[],
             )]);
         }
-        let result = store.query_traces(&TraceFilter::default(), 100);
-        assert_eq!(result.len(), 3);
-        let names: Vec<_> = result
+        assert_eq!(store.all_traces().len(), 3);
+        let names: Vec<_> = store
+            .all_traces()
             .iter()
             .map(|g| get_svc_name(&g.resource_spans[0]))
             .collect();
@@ -889,14 +526,11 @@ mod tests {
 
     #[test]
     fn eviction_traces_by_trace_id() {
-        // max_items=2 means keep at most 2 unique traces
         let (mut store, _rx) = Store::new(2);
-        // trace [1;16] has 2 ResourceSpans (counts as 1 trace)
         store.insert_traces(vec![
             make_resource_spans_full("svc-a", &[1; 16], &[], 100, 200),
             make_resource_spans_full("svc-b", &[1; 16], &[], 200, 300),
         ]);
-        // trace [2;16]: 2 unique traces now (at limit)
         store.insert_traces(vec![make_resource_spans_full(
             "svc-c",
             &[2; 16],
@@ -904,7 +538,6 @@ mod tests {
             300,
             400,
         )]);
-        // trace [3;16] triggers eviction (3 traces > max_items 2)
         store.insert_traces(vec![make_resource_spans_full(
             "svc-d",
             &[3; 16],
@@ -913,10 +546,9 @@ mod tests {
             500,
         )]);
 
-        let result = store.query_traces(&TraceFilter::default(), 100);
-        // trace [1;16] entirely evicted (both svc-a and svc-b removed)
-        assert_eq!(result.len(), 2);
-        let names: Vec<_> = result
+        assert_eq!(store.all_traces().len(), 2);
+        let names: Vec<_> = store
+            .all_traces()
             .iter()
             .map(|g| get_svc_name(&g.resource_spans[0]))
             .collect();
@@ -929,7 +561,7 @@ mod tests {
         for i in 0..5 {
             store.insert_logs(vec![make_resource_logs(&format!("svc-{i}"), "INFO", &[])]);
         }
-        assert_eq!(store.query_logs(&LogFilter::default(), 100).len(), 3);
+        assert_eq!(store.all_logs().len(), 3);
     }
 
     #[test]
@@ -938,251 +570,7 @@ mod tests {
         for i in 0..5 {
             store.insert_metrics(vec![make_resource_metrics(&format!("svc-{i}"), "cpu")]);
         }
-        assert_eq!(store.query_metrics(&MetricFilter::default(), 100).len(), 3);
-    }
-
-    #[test]
-    fn filter_traces_by_service_name() {
-        let (mut store, _rx) = Store::new(100);
-        store.insert_traces(vec![
-            make_resource_spans("frontend", &[1; 16], &[]),
-            make_resource_spans("backend", &[2; 16], &[]),
-            make_resource_spans("frontend", &[3; 16], &[]),
-        ]);
-        let filter = TraceFilter {
-            service_name: Some("frontend".to_string()),
-            ..Default::default()
-        };
-        assert_eq!(store.query_traces(&filter, 100).len(), 2);
-    }
-
-    #[test]
-    fn filter_traces_by_trace_id() {
-        let (mut store, _rx) = Store::new(100);
-        let trace_id_a = [
-            0xab, 0xcd, 0xef, 0x01, 0x23, 0x45, 0x67, 0x89, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-            0x00, 0x01,
-        ];
-        let trace_id_b = [
-            0xab, 0xcd, 0xef, 0x01, 0x23, 0x45, 0x67, 0x89, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-            0x00, 0x02,
-        ];
-        store.insert_traces(vec![
-            make_resource_spans("svc", &trace_id_a, &[]),
-            make_resource_spans("svc", &trace_id_b, &[]),
-        ]);
-        let filter = TraceFilter {
-            trace_id: Some("abcdef01234567890000000000000001".to_string()),
-            ..Default::default()
-        };
-        let result = store.query_traces(&filter, 100);
-        assert_eq!(result.len(), 1);
-        assert_eq!(result[0].trace_id, trace_id_a);
-    }
-
-    #[test]
-    fn filter_traces_by_attributes() {
-        let (mut store, _rx) = Store::new(100);
-        store.insert_traces(vec![
-            make_resource_spans("svc", &[1; 16], &[("env", "prod"), ("region", "us")]),
-            make_resource_spans("svc", &[2; 16], &[("env", "staging"), ("region", "eu")]),
-            make_resource_spans("svc", &[3; 16], &[("env", "prod"), ("region", "eu")]),
-        ]);
-
-        let filter = TraceFilter {
-            attributes: vec![("env".to_string(), "prod".to_string())],
-            ..Default::default()
-        };
-        assert_eq!(store.query_traces(&filter, 100).len(), 2);
-
-        let filter = TraceFilter {
-            attributes: vec![
-                ("env".to_string(), "prod".to_string()),
-                ("region".to_string(), "us".to_string()),
-            ],
-            ..Default::default()
-        };
-        assert_eq!(store.query_traces(&filter, 100).len(), 1);
-    }
-
-    #[test]
-    fn filter_logs_by_service_name() {
-        let (mut store, _rx) = Store::new(100);
-        store.insert_logs(vec![
-            make_resource_logs("frontend", "INFO", &[]),
-            make_resource_logs("backend", "WARN", &[]),
-            make_resource_logs("frontend", "ERROR", &[]),
-        ]);
-        let filter = LogFilter {
-            resource_conditions: vec![FilterCondition {
-                field: "service.name".into(),
-                operator: FilterOperator::Eq,
-                value: "frontend".into(),
-            }],
-            ..Default::default()
-        };
-        assert_eq!(store.query_logs(&filter, 100).len(), 2);
-    }
-
-    #[test]
-    fn filter_logs_by_severity() {
-        let (mut store, _rx) = Store::new(100);
-        store.insert_logs(vec![
-            make_resource_logs("svc", "INFO", &[]),
-            make_resource_logs("svc", "ERROR", &[]),
-            make_resource_logs("svc", "error", &[]),
-            make_resource_logs("svc", "WARN", &[]),
-        ]);
-        let filter = LogFilter {
-            severity: Some(SeverityCondition {
-                operator: FilterOperator::Eq,
-                value: "ERROR".into(),
-            }),
-            ..Default::default()
-        };
-        // severity_number for ERROR=17, error also maps to 17
-        assert_eq!(store.query_logs(&filter, 100).len(), 2);
-    }
-
-    #[test]
-    fn filter_logs_by_severity_ge() {
-        let (mut store, _rx) = Store::new(100);
-        store.insert_logs(vec![
-            make_resource_logs("svc", "DEBUG", &[]), // 5
-            make_resource_logs("svc", "INFO", &[]),  // 9
-            make_resource_logs("svc", "WARN", &[]),  // 13
-            make_resource_logs("svc", "ERROR", &[]), // 17
-        ]);
-        let filter = LogFilter {
-            severity: Some(SeverityCondition {
-                operator: FilterOperator::Ge,
-                value: "WARN".into(),
-            }),
-            ..Default::default()
-        };
-        // WARN(13) and ERROR(17) match >= WARN(13)
-        assert_eq!(store.query_logs(&filter, 100).len(), 2);
-    }
-
-    #[test]
-    fn filter_logs_by_severity_lt() {
-        let (mut store, _rx) = Store::new(100);
-        store.insert_logs(vec![
-            make_resource_logs("svc", "DEBUG", &[]), // 5
-            make_resource_logs("svc", "INFO", &[]),  // 9
-            make_resource_logs("svc", "WARN", &[]),  // 13
-            make_resource_logs("svc", "ERROR", &[]), // 17
-        ]);
-        let filter = LogFilter {
-            severity: Some(SeverityCondition {
-                operator: FilterOperator::Lt,
-                value: "WARN".into(),
-            }),
-            ..Default::default()
-        };
-        // DEBUG(5) and INFO(9) match < WARN(13)
-        assert_eq!(store.query_logs(&filter, 100).len(), 2);
-    }
-
-    #[test]
-    fn filter_logs_by_attributes() {
-        let (mut store, _rx) = Store::new(100);
-        store.insert_logs(vec![
-            make_resource_logs("svc", "INFO", &[("env", "prod")]),
-            make_resource_logs("svc", "INFO", &[("env", "staging")]),
-            make_resource_logs("svc", "INFO", &[("env", "prod"), ("region", "us")]),
-        ]);
-        let filter = LogFilter {
-            attribute_conditions: vec![FilterCondition {
-                field: "env".into(),
-                operator: FilterOperator::Eq,
-                value: "prod".into(),
-            }],
-            ..Default::default()
-        };
-        assert_eq!(store.query_logs(&filter, 100).len(), 2);
-    }
-
-    #[test]
-    fn filter_logs_by_attributes_contains() {
-        let (mut store, _rx) = Store::new(100);
-        store.insert_logs(vec![
-            make_resource_logs("svc", "INFO", &[("url", "/api/users")]),
-            make_resource_logs("svc", "INFO", &[("url", "/api/orders")]),
-            make_resource_logs("svc", "INFO", &[("url", "/health")]),
-        ]);
-        let filter = LogFilter {
-            attribute_conditions: vec![FilterCondition {
-                field: "url".into(),
-                operator: FilterOperator::Contains,
-                value: "/api".into(),
-            }],
-            ..Default::default()
-        };
-        assert_eq!(store.query_logs(&filter, 100).len(), 2);
-    }
-
-    #[test]
-    fn filter_logs_combined_severity_and_resource() {
-        let (mut store, _rx) = Store::new(100);
-        store.insert_logs(vec![
-            make_resource_logs("frontend", "INFO", &[]),
-            make_resource_logs("frontend", "ERROR", &[]),
-            make_resource_logs("backend", "ERROR", &[]),
-            make_resource_logs("backend", "INFO", &[]),
-        ]);
-        let filter = LogFilter {
-            severity: Some(SeverityCondition {
-                operator: FilterOperator::Ge,
-                value: "ERROR".into(),
-            }),
-            resource_conditions: vec![FilterCondition {
-                field: "service.name".into(),
-                operator: FilterOperator::Eq,
-                value: "frontend".into(),
-            }],
-            ..Default::default()
-        };
-        assert_eq!(store.query_logs(&filter, 100).len(), 1);
-    }
-
-    #[test]
-    fn filter_metrics_by_service_name() {
-        let (mut store, _rx) = Store::new(100);
-        store.insert_metrics(vec![
-            make_resource_metrics("frontend", "http.duration"),
-            make_resource_metrics("backend", "db.latency"),
-            make_resource_metrics("frontend", "http.count"),
-        ]);
-        let filter = MetricFilter {
-            service_name: Some("frontend".to_string()),
-            ..Default::default()
-        };
-        assert_eq!(store.query_metrics(&filter, 100).len(), 2);
-    }
-
-    #[test]
-    fn filter_metrics_by_metric_name() {
-        let (mut store, _rx) = Store::new(100);
-        store.insert_metrics(vec![
-            make_resource_metrics("svc", "http.duration"),
-            make_resource_metrics("svc", "db.latency"),
-            make_resource_metrics("svc", "http.duration"),
-        ]);
-        let filter = MetricFilter {
-            metric_name: Some("http.duration".to_string()),
-            ..Default::default()
-        };
-        assert_eq!(store.query_metrics(&filter, 100).len(), 2);
-    }
-
-    #[test]
-    fn query_limit() {
-        let (mut store, _rx) = Store::new(100);
-        for i in 0..10u8 {
-            store.insert_traces(vec![make_resource_spans("svc", &[i; 16], &[])]);
-        }
-        assert_eq!(store.query_traces(&TraceFilter::default(), 3).len(), 3);
+        assert_eq!(store.all_metrics().len(), 3);
     }
 
     #[test]
@@ -1224,10 +612,12 @@ mod tests {
             300,
         )]);
 
-        let result = store.query_traces(&TraceFilter::default(), 100);
-        // All three resource_spans are in the same trace group (same trace_id [0;16])
-        assert_eq!(result.len(), 1);
-        let names: Vec<_> = result[0].resource_spans.iter().map(get_svc_name).collect();
+        assert_eq!(store.all_traces().len(), 1);
+        let names: Vec<_> = store.all_traces()[0]
+            .resource_spans
+            .iter()
+            .map(get_svc_name)
+            .collect();
         assert_eq!(names, vec!["svc-100", "svc-200", "svc-300"]);
     }
 
@@ -1238,127 +628,65 @@ mod tests {
         store.insert_logs(vec![make_resource_logs_full("svc-100", "INFO", &[], 100)]);
         store.insert_logs(vec![make_resource_logs_full("svc-200", "INFO", &[], 200)]);
 
-        let result = store.query_logs(&LogFilter::default(), 100);
-        let names: Vec<_> = result.iter().map(get_log_svc_name).collect();
-        assert_eq!(names, vec!["svc-100", "svc-200", "svc-300"]);
+        assert_eq!(store.all_logs().len(), 3);
     }
 
     #[test]
-    fn filter_logs_by_service_name_field() {
+    fn trace_version_tracking() {
         let (mut store, _rx) = Store::new(100);
-        store.insert_logs(vec![
-            make_resource_logs("frontend", "INFO", &[]),
-            make_resource_logs("backend", "WARN", &[]),
-            make_resource_logs("frontend", "ERROR", &[]),
-        ]);
-        let filter = LogFilter {
-            resource_conditions: vec![FilterCondition {
-                field: "service.name".into(),
-                operator: FilterOperator::Eq,
-                value: "frontend".into(),
-            }],
-            ..Default::default()
-        };
-        let result = store.query_logs(&filter, 100);
+        assert_eq!(store.current_trace_version(), 0);
+
+        store.insert_traces(vec![make_resource_spans_full(
+            "svc-a",
+            &[1; 16],
+            &[],
+            100,
+            200,
+        )]);
+        assert_eq!(store.current_trace_version(), 1);
+
+        store.insert_traces(vec![make_resource_spans_full(
+            "svc-b",
+            &[1; 16],
+            &[],
+            200,
+            300,
+        )]);
+        assert_eq!(store.current_trace_version(), 2);
+
+        store.insert_traces(vec![make_resource_spans_full(
+            "svc-c",
+            &[2; 16],
+            &[],
+            300,
+            400,
+        )]);
+        assert_eq!(store.current_trace_version(), 3);
+
+        let result = store.query_traces_since_version(1);
         assert_eq!(result.len(), 2);
-        for rl in &result {
-            assert_eq!(get_log_svc_name(rl), "frontend");
-        }
+
+        let result = store.query_traces_since_version(2);
+        assert_eq!(result.len(), 1);
+
+        let result = store.query_traces_since_version(3);
+        assert_eq!(result.len(), 0);
     }
 
     #[test]
-    fn filter_logs_by_time_range() {
+    fn query_logs_since() {
         let (mut store, _rx) = Store::new(100);
         store.insert_logs(vec![
             make_resource_logs_full("svc", "INFO", &[], 100),
             make_resource_logs_full("svc", "INFO", &[], 200),
             make_resource_logs_full("svc", "INFO", &[], 300),
-            make_resource_logs_full("svc", "INFO", &[], 400),
         ]);
-
-        // start_time_ns only
-        let filter = LogFilter {
-            start_time_ns: Some(200),
-            ..Default::default()
-        };
-        assert_eq!(store.query_logs(&filter, 100).len(), 3);
-
-        // end_time_ns only
-        let filter = LogFilter {
-            end_time_ns: Some(300),
-            ..Default::default()
-        };
-        assert_eq!(store.query_logs(&filter, 100).len(), 3);
-
-        // both
-        let filter = LogFilter {
-            start_time_ns: Some(200),
-            end_time_ns: Some(300),
-            ..Default::default()
-        };
-        assert_eq!(store.query_logs(&filter, 100).len(), 2);
+        assert_eq!(store.query_logs_since(200).len(), 2);
+        assert_eq!(store.query_logs_since(301).len(), 0);
     }
 
     #[test]
-    fn filter_logs_combined_service_name_and_time() {
-        let (mut store, _rx) = Store::new(100);
-        store.insert_logs(vec![
-            make_resource_logs_full("frontend", "INFO", &[], 100),
-            make_resource_logs_full("backend", "INFO", &[], 200),
-            make_resource_logs_full("frontend", "WARN", &[], 300),
-            make_resource_logs_full("frontend", "ERROR", &[], 400),
-        ]);
-        let filter = LogFilter {
-            resource_conditions: vec![FilterCondition {
-                field: "service.name".into(),
-                operator: FilterOperator::Eq,
-                value: "frontend".into(),
-            }],
-            start_time_ns: Some(200),
-            ..Default::default()
-        };
-        let result = store.query_logs(&filter, 100);
-        assert_eq!(result.len(), 2);
-        for rl in &result {
-            assert_eq!(get_log_svc_name(rl), "frontend");
-        }
-    }
-
-    #[test]
-    fn filter_traces_by_time_range() {
-        let (mut store, _rx) = Store::new(100);
-        store.insert_traces(vec![
-            make_resource_spans_full("svc", &[1; 16], &[], 100, 200),
-            make_resource_spans_full("svc", &[2; 16], &[], 200, 300),
-            make_resource_spans_full("svc", &[3; 16], &[], 300, 400),
-            make_resource_spans_full("svc", &[4; 16], &[], 400, 500),
-        ]);
-
-        // start_time_ns only
-        let filter = TraceFilter {
-            start_time_ns: Some(200),
-            ..Default::default()
-        };
-        assert_eq!(store.query_traces(&filter, 100).len(), 3);
-
-        // end_time_ns only
-        let filter = TraceFilter {
-            end_time_ns: Some(300),
-            ..Default::default()
-        };
-        assert_eq!(store.query_traces(&filter, 100).len(), 3);
-
-        // both
-        let filter = TraceFilter {
-            start_time_ns: Some(200),
-            end_time_ns: Some(300),
-            ..Default::default()
-        };
-        assert_eq!(store.query_traces(&filter, 100).len(), 2);
-    }
-
-    #[test]
-    fn filter_metrics_by_time_range() {
+    fn query_metrics_since() {
         use crate::proto::opentelemetry::proto::metrics::v1::{
             Gauge, Metric, NumberDataPoint, ResourceMetrics, ScopeMetrics,
         };
@@ -1395,129 +723,8 @@ mod tests {
             make_resource_metrics_with_ts("svc", "cpu", 100),
             make_resource_metrics_with_ts("svc", "cpu", 200),
             make_resource_metrics_with_ts("svc", "cpu", 300),
-            make_resource_metrics_with_ts("svc", "cpu", 400),
         ]);
-
-        let filter = MetricFilter {
-            start_time_ns: Some(200),
-            ..Default::default()
-        };
-        assert_eq!(store.query_metrics(&filter, 100).len(), 3);
-
-        let filter = MetricFilter {
-            end_time_ns: Some(300),
-            ..Default::default()
-        };
-        assert_eq!(store.query_metrics(&filter, 100).len(), 3);
-
-        let filter = MetricFilter {
-            start_time_ns: Some(200),
-            end_time_ns: Some(300),
-            ..Default::default()
-        };
-        assert_eq!(store.query_metrics(&filter, 100).len(), 2);
-    }
-
-    #[test]
-    fn trace_version_tracking() {
-        let (mut store, _rx) = Store::new(100);
-        assert_eq!(store.current_trace_version(), 0);
-
-        store.insert_traces(vec![make_resource_spans_full(
-            "svc-a",
-            &[1; 16],
-            &[],
-            100,
-            200,
-        )]);
-        assert_eq!(store.current_trace_version(), 1);
-
-        // Adding a span to the same trace bumps version
-        store.insert_traces(vec![make_resource_spans_full(
-            "svc-b",
-            &[1; 16],
-            &[],
-            200,
-            300,
-        )]);
-        assert_eq!(store.current_trace_version(), 2);
-
-        // New trace
-        store.insert_traces(vec![make_resource_spans_full(
-            "svc-c",
-            &[2; 16],
-            &[],
-            300,
-            400,
-        )]);
-        assert_eq!(store.current_trace_version(), 3);
-
-        // query_traces_since_version returns only updated groups
-        let result = store.query_traces_since_version(&TraceFilter::default(), 1);
-        assert_eq!(result.len(), 2); // trace [1;16] (version=2) and [2;16] (version=3)
-
-        let result = store.query_traces_since_version(&TraceFilter::default(), 2);
-        assert_eq!(result.len(), 1); // only trace [2;16] (version=3)
-
-        let result = store.query_traces_since_version(&TraceFilter::default(), 3);
-        assert_eq!(result.len(), 0);
-    }
-
-    #[test]
-    fn query_traces_delta_returns_only_new_spans() {
-        let (mut store, _rx) = Store::new(100);
-
-        // Insert first span for trace [1;16]
-        store.insert_traces(vec![make_resource_spans_full(
-            "svc-a",
-            &[1; 16],
-            &[],
-            100,
-            200,
-        )]);
-        let v1 = store.current_trace_version(); // 1
-
-        // Insert second span for the same trace
-        store.insert_traces(vec![make_resource_spans_full(
-            "svc-b",
-            &[1; 16],
-            &[],
-            200,
-            300,
-        )]);
-        let v2 = store.current_trace_version(); // 2
-
-        // Delta since v1 should return only the new span (svc-b)
-        let result = store.query_traces_delta_since_version(&TraceFilter::default(), v1);
-        assert_eq!(result.len(), 1);
-        assert_eq!(result[0].resource_spans.len(), 1);
-        assert_eq!(get_svc_name(&result[0].resource_spans[0]), "svc-b");
-
-        // Full since_version returns the entire group (both spans)
-        let result = store.query_traces_since_version(&TraceFilter::default(), v1);
-        assert_eq!(result.len(), 1);
-        assert_eq!(result[0].resource_spans.len(), 2);
-
-        // Insert a new trace [2;16]
-        store.insert_traces(vec![make_resource_spans_full(
-            "svc-c",
-            &[2; 16],
-            &[],
-            300,
-            400,
-        )]);
-
-        // Delta since v2 should return [2;16] with all its spans (1 span)
-        let result = store.query_traces_delta_since_version(&TraceFilter::default(), v2);
-        assert_eq!(result.len(), 1);
-        assert_eq!(result[0].trace_id, vec![2; 16]);
-        assert_eq!(result[0].resource_spans.len(), 1);
-
-        // Delta since latest version returns nothing
-        let result = store.query_traces_delta_since_version(
-            &TraceFilter::default(),
-            store.current_trace_version(),
-        );
-        assert_eq!(result.len(), 0);
+        assert_eq!(store.query_metrics_since(200).len(), 2);
+        assert_eq!(store.query_metrics_since(301).len(), 0);
     }
 }

@@ -1,6 +1,7 @@
 pub mod clear;
 pub mod log;
 pub mod metrics;
+pub mod sql;
 pub mod trace;
 pub mod view;
 

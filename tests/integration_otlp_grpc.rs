@@ -11,8 +11,7 @@ use otel_cli::proto::opentelemetry::proto::{
     trace::v1::{ResourceSpans, ScopeSpans, Span},
 };
 use otel_cli::proto::otelcli::query::v1::{
-    query_service_client::QueryServiceClient, QueryLogsRequest, QueryMetricsRequest,
-    QueryTracesRequest,
+    query_service_client::QueryServiceClient, SqlQueryRequest,
 };
 use otel_cli::store;
 use tokio_util::sync::CancellationToken;
@@ -92,17 +91,11 @@ async fn test_grpc_trace_ingest_and_query() {
     let response = trace_client.export(request).await.unwrap();
     assert!(response.into_inner().partial_success.is_none());
 
-    // Query traces
+    // Query traces via SQL
     let mut query_client = QueryServiceClient::connect(query_addr).await.unwrap();
     let query_response = query_client
-        .query_traces(QueryTracesRequest {
-            service_name: "test-service".into(),
-            trace_id: String::new(),
-            attributes: Default::default(),
-            limit: 10,
-            start_time_unix_nano: 0,
-            end_time_unix_nano: 0,
-            delta: false,
+        .sql_query(SqlQueryRequest {
+            query: "SELECT * FROM traces WHERE service_name = 'test-service'".into(),
         })
         .await
         .unwrap();
@@ -142,16 +135,11 @@ async fn test_grpc_logs_ingest_and_query() {
     let response = logs_client.export(request).await.unwrap();
     assert!(response.into_inner().partial_success.is_none());
 
-    // Query logs
+    // Query logs via SQL
     let mut query_client = QueryServiceClient::connect(query_addr).await.unwrap();
     let query_response = query_client
-        .query_logs(QueryLogsRequest {
-            service_name: "log-service".into(),
-            severity: String::new(),
-            attributes: Default::default(),
-            limit: 10,
-            start_time_unix_nano: 0,
-            end_time_unix_nano: 0,
+        .sql_query(SqlQueryRequest {
+            query: "SELECT * FROM logs WHERE service_name = 'log-service'".into(),
         })
         .await
         .unwrap();
@@ -195,15 +183,11 @@ async fn test_grpc_metrics_ingest_and_query() {
     let response = metrics_client.export(request).await.unwrap();
     assert!(response.into_inner().partial_success.is_none());
 
-    // Query metrics
+    // Query metrics via SQL
     let mut query_client = QueryServiceClient::connect(query_addr).await.unwrap();
     let query_response = query_client
-        .query_metrics(QueryMetricsRequest {
-            service_name: "metric-service".into(),
-            metric_name: String::new(),
-            limit: 10,
-            start_time_unix_nano: 0,
-            end_time_unix_nano: 0,
+        .sql_query(SqlQueryRequest {
+            query: "SELECT * FROM metrics WHERE service_name = 'metric-service'".into(),
         })
         .await
         .unwrap();

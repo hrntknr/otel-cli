@@ -1,5 +1,5 @@
 use crate::proto::otelcli::query::v1::query_service_client::QueryServiceClient;
-use crate::proto::otelcli::query::v1::{QueryLogsRequest, QueryMetricsRequest, QueryTracesRequest};
+use crate::proto::otelcli::query::v1::SqlQueryRequest;
 use crate::store;
 
 pub async fn run_view(server: &str, max_items: usize) -> anyhow::Result<()> {
@@ -9,9 +9,8 @@ pub async fn run_view(server: &str, max_items: usize) -> anyhow::Result<()> {
 
     let traces_store = store.clone();
     let mut traces_stream = client
-        .follow_traces(QueryTracesRequest {
-            delta: true,
-            ..Default::default()
+        .follow_sql(SqlQueryRequest {
+            query: "SELECT * FROM traces".to_string(),
         })
         .await?
         .into_inner();
@@ -30,7 +29,9 @@ pub async fn run_view(server: &str, max_items: usize) -> anyhow::Result<()> {
 
     let logs_store = store.clone();
     let mut logs_stream = client
-        .follow_logs(QueryLogsRequest::default())
+        .follow_sql(SqlQueryRequest {
+            query: "SELECT * FROM logs".to_string(),
+        })
         .await?
         .into_inner();
     tokio::spawn(async move {
@@ -43,7 +44,9 @@ pub async fn run_view(server: &str, max_items: usize) -> anyhow::Result<()> {
 
     let metrics_store = store.clone();
     let mut metrics_stream = client
-        .follow_metrics(QueryMetricsRequest::default())
+        .follow_sql(SqlQueryRequest {
+            query: "SELECT * FROM metrics".to_string(),
+        })
         .await?
         .into_inner();
     tokio::spawn(async move {

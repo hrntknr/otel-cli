@@ -21,60 +21,43 @@ use crate::proto::opentelemetry::proto::{
     metrics::v1::{metric, number_data_point, ResourceMetrics},
     trace::v1::ResourceSpans,
 };
-use crate::store::{
-    self, FilterCondition, FilterOperator, LogFilter, SeverityCondition, SharedStore, StoreEvent,
-};
+use crate::store::{self, SharedStore, StoreEvent};
 
-pub struct TraceSummary {
-    pub trace_id: String,
-    pub root_service: String,
-    pub root_span_name: String,
-    pub span_count: usize,
-    pub duration: String,
-    pub start_time: String,
+// --- Local filter types (used only by TUI, converted to SQL internally) ---
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum FilterOperator {
+    Eq,
+    Contains,
+    NotEq,
+    NotContains,
+    Ge,
+    Gt,
+    Le,
+    Lt,
 }
 
-pub struct TimelineSpan {
-    pub span_id: String,
-    pub service_name: String,
-    pub span_name: String,
-    pub start_ns: u64,
-    pub end_ns: u64,
-    pub depth: usize,
-    pub duration: String,
-    pub status_code: i32,
+#[derive(Clone, Debug)]
+pub struct FilterCondition {
+    pub field: String,
+    pub operator: FilterOperator,
+    pub value: String,
 }
 
-#[derive(Default)]
-pub enum TraceView {
-    #[default]
-    List,
-    Timeline(String),
+#[derive(Clone, Debug)]
+pub struct SeverityCondition {
+    pub operator: FilterOperator,
+    pub value: String,
 }
 
-#[derive(Default)]
-pub enum MetricView {
-    #[default]
-    List,
-    Chart(String),
+#[derive(Clone, Debug, Default)]
+pub struct LogFilter {
+    pub severity: Option<SeverityCondition>,
+    pub attribute_conditions: Vec<FilterCondition>,
+    pub resource_conditions: Vec<FilterCondition>,
 }
 
-pub struct ChartSeries {
-    pub label: String,
-    pub data: Vec<(f64, f64)>,
-}
-
-pub struct LogRow {
-    pub timestamp: String,
-    pub severity: String,
-    pub service_name: String,
-    pub body: String,
-    pub trace_id: String,
-    pub span_id: String,
-    pub severity_number: i32,
-    pub attributes: Vec<(String, String)>,
-    pub resource_attributes: Vec<(String, String)>,
-}
+// --- Filter popup types ---
 
 #[derive(Clone)]
 pub enum FilterSection {
@@ -85,24 +68,23 @@ pub enum FilterSection {
 pub const SEVERITY_LEVELS: &[&str] = &["TRACE", "DEBUG", "INFO", "WARN", "ERROR", "FATAL"];
 
 pub enum FilterPopupMode {
-    /// Main list: 3 sections of filter conditions
-    List { selected: usize },
-    /// Severity level picker
-    SelectSeverity { selected: usize },
-    /// Field selection (for Attribute/ResourceAttribute)
+    List {
+        selected: usize,
+    },
+    SelectSeverity {
+        selected: usize,
+    },
     SelectField {
         section: FilterSection,
         candidates: Vec<String>,
         selected: usize,
         input: String,
     },
-    /// Operator selection
     SelectOperator {
         section: FilterSection,
         field: String,
         selected: usize,
     },
-    /// Value input
     InputValue {
         section: FilterSection,
         field: String,
@@ -119,7 +101,6 @@ pub struct LogFilterPopup {
 }
 
 impl LogFilterPopup {
-    /// Total items in the list view
     pub fn list_item_count(&self) -> usize {
         filter_list_item_count(
             self.attribute_conditions.len(),
@@ -127,7 +108,6 @@ impl LogFilterPopup {
         )
     }
 
-    /// Determine what kind of item is at a given list index
     pub fn item_at(&self, idx: usize) -> ListItem {
         filter_item_at(
             idx,
@@ -137,13 +117,11 @@ impl LogFilterPopup {
     }
 }
 
-/// Free function to compute list item count (avoids borrow issues)
 fn filter_list_item_count(na: usize, nr: usize) -> usize {
     // Severity + attrs + [+]Add Attr + resource attrs + [+]Add Resource + [Apply]
     1 + na + 1 + nr + 1 + 1
 }
 
-/// Free function to determine item at given index (avoids borrow issues)
 fn filter_item_at(idx: usize, na: usize, nr: usize) -> ListItem {
     if idx == 0 {
         ListItem::Severity
@@ -204,6 +182,57 @@ pub fn operator_label(op: &FilterOperator) -> &'static str {
         FilterOperator::Le => "less or equal",
         FilterOperator::Lt => "less than",
     }
+}
+
+pub struct TraceSummary {
+    pub trace_id: String,
+    pub root_service: String,
+    pub root_span_name: String,
+    pub span_count: usize,
+    pub duration: String,
+    pub start_time: String,
+}
+
+pub struct TimelineSpan {
+    pub span_id: String,
+    pub service_name: String,
+    pub span_name: String,
+    pub start_ns: u64,
+    pub end_ns: u64,
+    pub depth: usize,
+    pub duration: String,
+    pub status_code: i32,
+}
+
+#[derive(Default)]
+pub enum TraceView {
+    #[default]
+    List,
+    Timeline(String),
+}
+
+#[derive(Default)]
+pub enum MetricView {
+    #[default]
+    List,
+    Chart(String),
+}
+
+pub struct ChartSeries {
+    pub label: String,
+    pub data: Vec<(f64, f64)>,
+}
+
+pub struct LogRow {
+    pub timestamp: String,
+    pub severity: String,
+    pub service_name: String,
+    pub body: String,
+    pub trace_id: String,
+    pub span_id: String,
+    pub severity_number: i32,
+    pub attributes: Vec<(String, String)>,
+    pub resource_attributes: Vec<(String, String)>,
 }
 
 pub struct MetricDataPoint {
@@ -526,8 +555,9 @@ impl App {
                 severity: popup.severity,
                 attribute_conditions: popup.attribute_conditions,
                 resource_conditions: popup.resource_conditions,
-                ..Default::default()
             };
+            self.table_state = TableState::default();
+            self.follow = true;
             self.pending_refresh = true;
         }
     }
@@ -1009,30 +1039,34 @@ impl App {
         refresh_logs: bool,
         refresh_metrics: bool,
     ) {
-        // Query store (read lock) — collect all needed data before dropping
         let store = self.store.read().await;
         self.trace_count = store.trace_count();
         self.log_count = store.log_count();
         self.metric_count = store.metric_count();
 
         let traces = if refresh_traces {
-            Some(store.query_traces(&Default::default(), usize::MAX))
+            Some(store.all_traces().iter().cloned().collect::<Vec<_>>())
         } else {
             None
         };
+
         let (all_logs, filtered_logs) = if refresh_logs {
-            let all = store.query_logs(&LogFilter::default(), usize::MAX);
-            let filtered = if self.log_filter_condition_count() > 0 {
-                store.query_logs(&self.log_filter, usize::MAX)
-            } else {
-                all.clone()
+            let all: Vec<_> = store.all_logs().iter().cloned().collect();
+            let log_query = log_filter_to_sql(&self.log_filter);
+            let filtered = match crate::query::sql::parse(&log_query) {
+                Ok(parsed) => match crate::query::sql::execute(&store, &parsed) {
+                    crate::query::QueryResult::Logs(l) => l,
+                    _ => all.clone(),
+                },
+                Err(_) => all.clone(),
             };
             (Some(all), Some(filtered))
         } else {
             (None, None)
         };
+
         let metrics = if refresh_metrics {
-            Some(store.query_metrics(&Default::default(), usize::MAX))
+            Some(store.all_metrics().iter().cloned().collect::<Vec<_>>())
         } else {
             None
         };
@@ -1118,7 +1152,10 @@ impl App {
         }
     }
 
-    fn update_available_fields(&mut self, logs: &[ResourceLogs]) {
+    fn update_available_fields(
+        &mut self,
+        logs: &[crate::proto::opentelemetry::proto::logs::v1::ResourceLogs],
+    ) {
         let mut log_fields = std::collections::BTreeSet::new();
         let mut resource_fields = std::collections::BTreeSet::new();
 
@@ -1139,6 +1176,44 @@ impl App {
 
         self.available_log_fields = log_fields.into_iter().collect();
         self.available_resource_fields = resource_fields.into_iter().collect();
+    }
+}
+
+fn log_filter_to_sql(filter: &LogFilter) -> String {
+    let mut conditions = Vec::new();
+
+    if let Some(ref sev) = filter.severity {
+        conditions.push(format!("severity >= '{}'", sev.value));
+    }
+
+    for cond in &filter.attribute_conditions {
+        let col = format!("attributes['{}']", cond.field);
+        conditions.push(filter_condition_to_sql(&col, &cond.operator, &cond.value));
+    }
+
+    for cond in &filter.resource_conditions {
+        let col = format!("resource['{}']", cond.field);
+        conditions.push(filter_condition_to_sql(&col, &cond.operator, &cond.value));
+    }
+
+    if conditions.is_empty() {
+        "SELECT * FROM logs".to_string()
+    } else {
+        format!("SELECT * FROM logs WHERE {}", conditions.join(" AND "))
+    }
+}
+
+fn filter_condition_to_sql(column: &str, op: &FilterOperator, value: &str) -> String {
+    let escaped = value.replace('\'', "''");
+    match op {
+        FilterOperator::Eq => format!("{} = '{}'", column, escaped),
+        FilterOperator::NotEq => format!("{} != '{}'", column, escaped),
+        FilterOperator::Contains => format!("{} LIKE '%{}%'", column, escaped),
+        FilterOperator::NotContains => format!("{} NOT LIKE '%{}%'", column, escaped),
+        FilterOperator::Ge => format!("{} >= '{}'", column, escaped),
+        FilterOperator::Gt => format!("{} > '{}'", column, escaped),
+        FilterOperator::Le => format!("{} <= '{}'", column, escaped),
+        FilterOperator::Lt => format!("{} < '{}'", column, escaped),
     }
 }
 

@@ -195,6 +195,26 @@ Examples:
         #[arg(long)]
         until: Option<String>,
     },
+    /// Run SQL query against the server
+    #[command(after_long_help = "\
+Examples:
+  $ otel-cli sql \"SELECT * FROM traces\"
+  $ otel-cli sql \"SELECT * FROM logs WHERE severity >= 'ERROR'\"
+  $ otel-cli sql -f \"SELECT * FROM logs\"          Follow mode
+  $ otel-cli sql \"SELECT * FROM metrics\" --format json")]
+    Sql {
+        /// Server address
+        #[arg(long, default_value = "http://localhost:4319")]
+        server: String,
+        /// SQL query string
+        query: String,
+        /// Output format
+        #[arg(long, default_value = "text")]
+        format: OutputFormat,
+        /// Follow new results in real-time
+        #[arg(short = 'f', long)]
+        follow: bool,
+    },
     /// Install agent skill for AI-assisted operation
     #[command(after_long_help = "\
 Examples:
@@ -215,7 +235,6 @@ Examples:
 pub enum OutputFormat {
     Text,
     Json,
-    Toon,
 }
 
 fn parse_key_val(s: &str) -> Result<(String, String), String> {

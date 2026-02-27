@@ -8,25 +8,11 @@ import "opentelemetry/proto/metrics/v1/metrics.proto";
 import "opentelemetry/proto/resource/v1/resource.proto";
 
 service QueryService {
-  rpc QueryTraces(QueryTracesRequest) returns (QueryTracesResponse);
-  rpc FollowTraces(QueryTracesRequest) returns (stream QueryTracesResponse);
-  rpc QueryLogs(QueryLogsRequest) returns (QueryLogsResponse);
-  rpc FollowLogs(QueryLogsRequest) returns (stream QueryLogsResponse);
-  rpc QueryMetrics(QueryMetricsRequest) returns (QueryMetricsResponse);
-  rpc FollowMetrics(QueryMetricsRequest) returns (stream QueryMetricsResponse);
+  rpc SqlQuery(SqlQueryRequest) returns (SqlQueryResponse);
+  rpc FollowSql(SqlQueryRequest) returns (stream SqlQueryResponse);
   rpc ClearTraces(ClearTracesRequest) returns (ClearResponse);
   rpc ClearLogs(ClearLogsRequest) returns (ClearResponse);
   rpc ClearMetrics(ClearMetricsRequest) returns (ClearResponse);
-}
-
-message QueryTracesRequest {
-  string service_name = 1;
-  string trace_id = 2;
-  map<string, string> attributes = 3;
-  int32 limit = 4;
-  uint64 start_time_unix_nano = 5;
-  uint64 end_time_unix_nano = 6;
-  bool delta = 7;
 }
 
 message TraceGroup {
@@ -34,33 +20,14 @@ message TraceGroup {
   repeated opentelemetry.proto.trace.v1.ResourceSpans resource_spans = 2;
 }
 
-message QueryTracesResponse {
+message SqlQueryRequest {
+  string query = 1;
+}
+
+message SqlQueryResponse {
   repeated TraceGroup trace_groups = 1;
-}
-
-message QueryLogsRequest {
-  string service_name = 1;
-  string severity = 2;
-  map<string, string> attributes = 3;
-  int32 limit = 4;
-  uint64 start_time_unix_nano = 5;
-  uint64 end_time_unix_nano = 6;
-}
-
-message QueryLogsResponse {
-  repeated opentelemetry.proto.logs.v1.ResourceLogs resource_logs = 1;
-}
-
-message QueryMetricsRequest {
-  string service_name = 1;
-  string metric_name = 2;
-  int32 limit = 3;
-  uint64 start_time_unix_nano = 4;
-  uint64 end_time_unix_nano = 5;
-}
-
-message QueryMetricsResponse {
-  repeated opentelemetry.proto.metrics.v1.ResourceMetrics resource_metrics = 1;
+  repeated opentelemetry.proto.logs.v1.ResourceLogs resource_logs = 2;
+  repeated opentelemetry.proto.metrics.v1.ResourceMetrics resource_metrics = 3;
 }
 
 message ClearTracesRequest {}

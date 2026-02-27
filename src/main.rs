@@ -127,6 +127,19 @@ async fn main() -> anyhow::Result<()> {
             client::view::run_view(&server, max_items).await?;
             Ok(())
         }
+        Commands::Sql {
+            server,
+            query,
+            format,
+            follow,
+        } => {
+            if follow {
+                client::sql::follow_sql(&server, &query, &format).await?;
+            } else {
+                client::sql::query_sql(&server, &query, &format).await?;
+            }
+            Ok(())
+        }
         Commands::SkillInstall { global, force } => {
             otel_cli::install::run(global, force)?;
             Ok(())

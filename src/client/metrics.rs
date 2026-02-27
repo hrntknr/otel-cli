@@ -1,38 +1,14 @@
 use crate::cli::OutputFormat;
 use crate::proto::opentelemetry::proto::metrics::v1::{metric, number_data_point, ResourceMetrics};
 use crate::proto::otelcli::query::v1::query_service_client::QueryServiceClient;
-use crate::proto::otelcli::query::v1::QueryMetricsRequest;
+use crate::proto::otelcli::query::v1::SqlQueryRequest;
+use crate::query::sql::convert::metric_flags_to_sql;
 
 use super::{
     extract_any_value_string, format_attributes_json, format_timestamp, get_resource_attributes,
     parse_time_spec,
 };
 
-fn build_query_request(
-    service: Option<String>,
-    name: Option<String>,
-    limit: i32,
-    since: Option<String>,
-    until: Option<String>,
-) -> anyhow::Result<QueryMetricsRequest> {
-    let start_time_unix_nano = match since {
-        Some(ref s) => parse_time_spec(s)?,
-        None => 0,
-    };
-    let end_time_unix_nano = match until {
-        Some(ref s) => parse_time_spec(s)?,
-        None => 0,
-    };
-    Ok(QueryMetricsRequest {
-        service_name: service.unwrap_or_default(),
-        metric_name: name.unwrap_or_default(),
-        limit,
-        start_time_unix_nano,
-        end_time_unix_nano,
-    })
-}
-
-#[allow(clippy::too_many_arguments)]
 pub async fn query_metrics(
     server: &str,
     service: Option<String>,
@@ -42,9 +18,21 @@ pub async fn query_metrics(
     since: Option<String>,
     until: Option<String>,
 ) -> anyhow::Result<()> {
+    let start_time_ns = since.as_deref().map(parse_time_spec).transpose()?;
+    let end_time_ns = until.as_deref().map(parse_time_spec).transpose()?;
+    let sql = metric_flags_to_sql(
+        service.as_deref(),
+        name.as_deref(),
+        Some(limit as usize),
+        start_time_ns,
+        end_time_ns,
+    );
+
     let mut client = QueryServiceClient::connect(server.to_string()).await?;
-    let request = build_query_request(service, name, limit, since, until)?;
-    let response = client.query_metrics(request).await?.into_inner();
+    let response = client
+        .sql_query(SqlQueryRequest { query: sql })
+        .await?
+        .into_inner();
 
     match format {
         OutputFormat::Json => {
@@ -52,9 +40,6 @@ pub async fn query_metrics(
         }
         OutputFormat::Text => {
             print_metrics_text(&response.resource_metrics);
-        }
-        OutputFormat::Toon => {
-            print_metrics_toon(&response.resource_metrics)?;
         }
     }
 
@@ -70,9 +55,21 @@ pub async fn follow_metrics(
     since: Option<String>,
     until: Option<String>,
 ) -> anyhow::Result<()> {
+    let start_time_ns = since.as_deref().map(parse_time_spec).transpose()?;
+    let end_time_ns = until.as_deref().map(parse_time_spec).transpose()?;
+    let sql = metric_flags_to_sql(
+        service.as_deref(),
+        name.as_deref(),
+        Some(limit as usize),
+        start_time_ns,
+        end_time_ns,
+    );
+
     let mut client = QueryServiceClient::connect(server.to_string()).await?;
-    let request = build_query_request(service, name, limit, since, until)?;
-    let mut stream = client.follow_metrics(request).await?.into_inner();
+    let mut stream = client
+        .follow_sql(SqlQueryRequest { query: sql })
+        .await?
+        .into_inner();
 
     while let Some(msg) = stream.message().await? {
         match format {
@@ -81,9 +78,6 @@ pub async fn follow_metrics(
             }
             OutputFormat::Text => {
                 print_metrics_text(&msg.resource_metrics);
-            }
-            OutputFormat::Toon => {
-                print_metrics_toon(&msg.resource_metrics)?;
             }
         }
     }
@@ -110,7 +104,7 @@ fn format_number_value(value: &Option<number_data_point::Value>) -> String {
     }
 }
 
-fn print_metrics_text(resource_metrics: &[ResourceMetrics]) {
+pub fn print_metrics_text(resource_metrics: &[ResourceMetrics]) {
     for rm in resource_metrics {
         let resource_attrs = get_resource_attributes(&rm.resource);
         for sm in &rm.scope_metrics {
@@ -211,18 +205,9 @@ fn build_metrics_value(resource_metrics: &[ResourceMetrics]) -> Vec<serde_json::
     metrics
 }
 
-fn print_metrics_json(resource_metrics: &[ResourceMetrics]) -> anyhow::Result<()> {
+pub fn print_metrics_json(resource_metrics: &[ResourceMetrics]) -> anyhow::Result<()> {
     let metrics = build_metrics_value(resource_metrics);
     println!("{}", serde_json::to_string_pretty(&metrics)?);
-    Ok(())
-}
-
-fn print_metrics_toon(resource_metrics: &[ResourceMetrics]) -> anyhow::Result<()> {
-    let metrics = build_metrics_value(resource_metrics);
-    println!(
-        "{}",
-        toon_format::encode_default(&serde_json::json!(metrics))?
-    );
     Ok(())
 }
 

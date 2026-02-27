@@ -5,8 +5,8 @@ use super::tabs::Tab;
 use ratatui::symbols;
 
 use super::{
-    operator_label, operator_symbol, App, FilterPopupMode, LogRow, MetricGroup, MetricView,
-    TraceView, ALL_OPERATORS, SEVERITY_LEVELS,
+    operator_label, operator_symbol, App, FilterPopupMode, LogFilterPopup, LogRow, MetricGroup,
+    MetricView, TraceView, ALL_OPERATORS, SEVERITY_LEVELS,
 };
 
 pub fn draw(frame: &mut Frame, app: &mut App) {
@@ -754,7 +754,7 @@ fn draw_filter_popup(frame: &mut Frame, area: Rect, app: &App) {
     }
 }
 
-fn draw_filter_list(frame: &mut Frame, area: Rect, popup: &super::LogFilterPopup, selected: usize) {
+fn draw_filter_list(frame: &mut Frame, area: Rect, popup: &LogFilterPopup, selected: usize) {
     let highlight = Style::default().bg(Color::DarkGray).fg(Color::White);
     let section_style = Style::default()
         .fg(Color::Cyan)

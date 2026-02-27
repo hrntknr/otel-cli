@@ -1,39 +1,12 @@
 use crate::cli::OutputFormat;
 use crate::proto::otelcli::query::v1::query_service_client::QueryServiceClient;
-use crate::proto::otelcli::query::v1::{QueryTracesRequest, TraceGroup};
+use crate::proto::otelcli::query::v1::{SqlQueryRequest, TraceGroup};
+use crate::query::sql::convert::trace_flags_to_sql;
 
 use super::{
     extract_any_value_string, format_attributes_json, format_timestamp, get_resource_attributes,
     hex_encode, parse_time_spec,
 };
-
-fn build_query_request(
-    service: Option<String>,
-    trace_id: Option<String>,
-    attributes: Vec<(String, String)>,
-    limit: i32,
-    since: Option<String>,
-    until: Option<String>,
-    delta: bool,
-) -> anyhow::Result<QueryTracesRequest> {
-    let start_time_unix_nano = match since {
-        Some(ref s) => parse_time_spec(s)?,
-        None => 0,
-    };
-    let end_time_unix_nano = match until {
-        Some(ref s) => parse_time_spec(s)?,
-        None => 0,
-    };
-    Ok(QueryTracesRequest {
-        service_name: service.unwrap_or_default(),
-        trace_id: trace_id.unwrap_or_default(),
-        attributes: attributes.into_iter().collect(),
-        limit,
-        start_time_unix_nano,
-        end_time_unix_nano,
-        delta,
-    })
-}
 
 #[allow(clippy::too_many_arguments)]
 pub async fn query_traces(
@@ -46,9 +19,22 @@ pub async fn query_traces(
     since: Option<String>,
     until: Option<String>,
 ) -> anyhow::Result<()> {
+    let start_time_ns = since.as_deref().map(parse_time_spec).transpose()?;
+    let end_time_ns = until.as_deref().map(parse_time_spec).transpose()?;
+    let sql = trace_flags_to_sql(
+        service.as_deref(),
+        trace_id.as_deref(),
+        &attributes,
+        Some(limit as usize),
+        start_time_ns,
+        end_time_ns,
+    );
+
     let mut client = QueryServiceClient::connect(server.to_string()).await?;
-    let request = build_query_request(service, trace_id, attributes, limit, since, until, false)?;
-    let response = client.query_traces(request).await?.into_inner();
+    let response = client
+        .sql_query(SqlQueryRequest { query: sql })
+        .await?
+        .into_inner();
 
     match format {
         OutputFormat::Json => {
@@ -56,9 +42,6 @@ pub async fn query_traces(
         }
         OutputFormat::Text => {
             print_traces_text(&response.trace_groups);
-        }
-        OutputFormat::Toon => {
-            print_traces_toon(&response.trace_groups)?;
         }
     }
 
@@ -75,11 +58,24 @@ pub async fn follow_traces(
     format: &OutputFormat,
     since: Option<String>,
     until: Option<String>,
-    delta: bool,
+    _delta: bool,
 ) -> anyhow::Result<()> {
+    let start_time_ns = since.as_deref().map(parse_time_spec).transpose()?;
+    let end_time_ns = until.as_deref().map(parse_time_spec).transpose()?;
+    let sql = trace_flags_to_sql(
+        service.as_deref(),
+        trace_id.as_deref(),
+        &attributes,
+        Some(limit as usize),
+        start_time_ns,
+        end_time_ns,
+    );
+
     let mut client = QueryServiceClient::connect(server.to_string()).await?;
-    let request = build_query_request(service, trace_id, attributes, limit, since, until, delta)?;
-    let mut stream = client.follow_traces(request).await?.into_inner();
+    let mut stream = client
+        .follow_sql(SqlQueryRequest { query: sql })
+        .await?
+        .into_inner();
 
     while let Some(msg) = stream.message().await? {
         match format {
@@ -89,16 +85,13 @@ pub async fn follow_traces(
             OutputFormat::Text => {
                 print_traces_text(&msg.trace_groups);
             }
-            OutputFormat::Toon => {
-                print_traces_toon(&msg.trace_groups)?;
-            }
         }
     }
 
     Ok(())
 }
 
-fn print_traces_text(trace_groups: &[TraceGroup]) {
+pub fn print_traces_text(trace_groups: &[TraceGroup]) {
     for group in trace_groups {
         let trace_id = hex_encode(&group.trace_id);
         println!("Trace: {}", trace_id);
@@ -178,17 +171,8 @@ fn build_traces_value(trace_groups: &[TraceGroup]) -> Vec<serde_json::Value> {
     traces
 }
 
-fn print_traces_json(trace_groups: &[TraceGroup]) -> anyhow::Result<()> {
+pub fn print_traces_json(trace_groups: &[TraceGroup]) -> anyhow::Result<()> {
     let traces = build_traces_value(trace_groups);
     println!("{}", serde_json::to_string_pretty(&traces)?);
-    Ok(())
-}
-
-fn print_traces_toon(trace_groups: &[TraceGroup]) -> anyhow::Result<()> {
-    let traces = build_traces_value(trace_groups);
-    println!(
-        "{}",
-        toon_format::encode_default(&serde_json::json!(traces))?
-    );
     Ok(())
 }

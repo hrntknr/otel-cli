@@ -11,8 +11,7 @@ use otel_cli::proto::opentelemetry::proto::{
     trace::v1::{ResourceSpans, ScopeSpans, Span},
 };
 use otel_cli::proto::otelcli::query::v1::{
-    query_service_client::QueryServiceClient, QueryLogsRequest, QueryMetricsRequest,
-    QueryTracesRequest,
+    query_service_client::QueryServiceClient, SqlQueryRequest,
 };
 use otel_cli::store;
 use tokio_util::sync::CancellationToken;
@@ -101,17 +100,11 @@ async fn test_e2e_trace_query() {
         .await
         .unwrap();
 
-    // Query traces
+    // Query traces via SQL
     let mut query_client = QueryServiceClient::connect(query_addr).await.unwrap();
     let response = query_client
-        .query_traces(QueryTracesRequest {
-            service_name: "test-trace-svc".into(),
-            trace_id: String::new(),
-            attributes: Default::default(),
-            limit: 100,
-            start_time_unix_nano: 0,
-            end_time_unix_nano: 0,
-            delta: false,
+        .sql_query(SqlQueryRequest {
+            query: "SELECT * FROM traces WHERE service_name = 'test-trace-svc'".into(),
         })
         .await
         .unwrap();
@@ -163,16 +156,11 @@ async fn test_e2e_log_query() {
         .await
         .unwrap();
 
-    // Query logs
+    // Query logs via SQL
     let mut query_client = QueryServiceClient::connect(query_addr).await.unwrap();
     let response = query_client
-        .query_logs(QueryLogsRequest {
-            service_name: "test-log-svc".into(),
-            severity: String::new(),
-            attributes: Default::default(),
-            limit: 100,
-            start_time_unix_nano: 0,
-            end_time_unix_nano: 0,
+        .sql_query(SqlQueryRequest {
+            query: "SELECT * FROM logs WHERE service_name = 'test-log-svc'".into(),
         })
         .await
         .unwrap();
@@ -221,15 +209,11 @@ async fn test_e2e_metric_query() {
         .await
         .unwrap();
 
-    // Query metrics
+    // Query metrics via SQL
     let mut query_client = QueryServiceClient::connect(query_addr).await.unwrap();
     let response = query_client
-        .query_metrics(QueryMetricsRequest {
-            service_name: "test-metric-svc".into(),
-            metric_name: "request_count".into(),
-            limit: 100,
-            start_time_unix_nano: 0,
-            end_time_unix_nano: 0,
+        .sql_query(SqlQueryRequest {
+            query: "SELECT * FROM metrics WHERE metric_name = 'request_count'".into(),
         })
         .await
         .unwrap();
