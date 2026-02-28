@@ -1,5 +1,5 @@
 use crate::proto::otelcli::query::v1::query_service_client::QueryServiceClient;
-use crate::proto::otelcli::query::v1::SqlQueryRequest;
+use crate::proto::otelcli::query::v1::FollowRequest;
 use crate::store;
 
 pub async fn run_view(server: &str, max_items: usize) -> anyhow::Result<()> {
@@ -8,32 +8,17 @@ pub async fn run_view(server: &str, max_items: usize) -> anyhow::Result<()> {
     let mut client = QueryServiceClient::connect(server.to_string()).await?;
 
     let traces_store = store.clone();
-    let mut traces_stream = client
-        .follow_sql(SqlQueryRequest {
-            query: "SELECT * FROM traces".to_string(),
-        })
-        .await?
-        .into_inner();
+    let mut traces_stream = client.follow_traces(FollowRequest {}).await?.into_inner();
     tokio::spawn(async move {
         while let Ok(Some(msg)) = traces_stream.message().await {
-            let resource_spans: Vec<_> = msg
-                .trace_groups
-                .into_iter()
-                .flat_map(|g| g.resource_spans)
-                .collect();
-            if !resource_spans.is_empty() {
-                traces_store.write().await.insert_traces(resource_spans);
+            if !msg.resource_spans.is_empty() {
+                traces_store.write().await.insert_traces(msg.resource_spans);
             }
         }
     });
 
     let logs_store = store.clone();
-    let mut logs_stream = client
-        .follow_sql(SqlQueryRequest {
-            query: "SELECT * FROM logs".to_string(),
-        })
-        .await?
-        .into_inner();
+    let mut logs_stream = client.follow_logs(FollowRequest {}).await?.into_inner();
     tokio::spawn(async move {
         while let Ok(Some(msg)) = logs_stream.message().await {
             if !msg.resource_logs.is_empty() {
@@ -43,12 +28,7 @@ pub async fn run_view(server: &str, max_items: usize) -> anyhow::Result<()> {
     });
 
     let metrics_store = store.clone();
-    let mut metrics_stream = client
-        .follow_sql(SqlQueryRequest {
-            query: "SELECT * FROM metrics".to_string(),
-        })
-        .await?
-        .into_inner();
+    let mut metrics_stream = client.follow_metrics(FollowRequest {}).await?.into_inner();
     tokio::spawn(async move {
         while let Ok(Some(msg)) = metrics_stream.message().await {
             if !msg.resource_metrics.is_empty() {

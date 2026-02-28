@@ -5,9 +5,10 @@ use tonic::{Request, Response, Status};
 
 use crate::proto::otelcli::query::v1::{
     query_service_server::QueryService as QueryServiceTrait, ClearLogsRequest, ClearMetricsRequest,
-    ClearResponse, ClearTracesRequest, SqlQueryRequest, SqlQueryResponse,
+    ClearResponse, ClearTracesRequest, FollowLogsResponse, FollowMetricsResponse, FollowRequest,
+    FollowTracesResponse, SqlQueryRequest, SqlQueryResponse,
 };
-use crate::query::{QueryResult, TargetTable};
+use crate::query::TargetTable;
 use crate::store::{SharedStore, StoreEvent};
 
 pub struct QueryGrpcService {
@@ -20,29 +21,44 @@ impl QueryGrpcService {
     }
 }
 
-fn to_sql_response(result: QueryResult) -> SqlQueryResponse {
-    match result {
-        QueryResult::Traces(groups) => SqlQueryResponse {
-            trace_groups: groups
-                .into_iter()
-                .map(|g| crate::proto::otelcli::query::v1::TraceGroup {
-                    trace_id: g.trace_id,
-                    resource_spans: g.resource_spans,
-                })
-                .collect(),
-            resource_logs: vec![],
-            resource_metrics: vec![],
-        },
-        QueryResult::Logs(logs) => SqlQueryResponse {
-            trace_groups: vec![],
-            resource_logs: logs,
-            resource_metrics: vec![],
-        },
-        QueryResult::Metrics(metrics) => SqlQueryResponse {
-            trace_groups: vec![],
-            resource_logs: vec![],
-            resource_metrics: metrics,
-        },
+fn rows_to_proto(rows: Vec<crate::query::Row>) -> SqlQueryResponse {
+    use crate::proto::opentelemetry::proto::common::v1::{any_value, AnyValue, KeyValueList};
+
+    fn row_value_to_any_value(rv: &crate::query::RowValue) -> Option<AnyValue> {
+        match rv {
+            crate::query::RowValue::String(s) => Some(AnyValue {
+                value: Some(any_value::Value::StringValue(s.clone())),
+            }),
+            crate::query::RowValue::Int(i) => Some(AnyValue {
+                value: Some(any_value::Value::IntValue(*i)),
+            }),
+            crate::query::RowValue::Double(d) => Some(AnyValue {
+                value: Some(any_value::Value::DoubleValue(*d)),
+            }),
+            crate::query::RowValue::KeyValueList(kvs) => Some(AnyValue {
+                value: Some(any_value::Value::KvlistValue(KeyValueList {
+                    values: kvs.clone(),
+                })),
+            }),
+            crate::query::RowValue::Null => None,
+        }
+    }
+
+    SqlQueryResponse {
+        rows: rows
+            .into_iter()
+            .map(|row| crate::proto::otelcli::query::v1::Row {
+                columns: row
+                    .into_iter()
+                    .map(
+                        |(name, value)| crate::proto::otelcli::query::v1::ColumnValue {
+                            name,
+                            value: row_value_to_any_value(&value),
+                        },
+                    )
+                    .collect(),
+            })
+            .collect(),
     }
 }
 
@@ -50,6 +66,12 @@ fn to_sql_response(result: QueryResult) -> SqlQueryResponse {
 impl QueryServiceTrait for QueryGrpcService {
     type FollowSqlStream =
         Pin<Box<dyn Stream<Item = Result<SqlQueryResponse, Status>> + Send + 'static>>;
+    type FollowTracesStream =
+        Pin<Box<dyn Stream<Item = Result<FollowTracesResponse, Status>> + Send + 'static>>;
+    type FollowLogsStream =
+        Pin<Box<dyn Stream<Item = Result<FollowLogsResponse, Status>> + Send + 'static>>;
+    type FollowMetricsStream =
+        Pin<Box<dyn Stream<Item = Result<FollowMetricsResponse, Status>> + Send + 'static>>;
 
     async fn sql_query(
         &self,
@@ -59,8 +81,8 @@ impl QueryServiceTrait for QueryGrpcService {
         let parsed = crate::query::sql::parse(&req.query)
             .map_err(|e| Status::invalid_argument(format!("SQL parse error: {}", e)))?;
         let store = self.store.read().await;
-        let result = crate::query::sql::execute(&store, &parsed);
-        Ok(Response::new(to_sql_response(result)))
+        let rows = crate::query::sql::execute(&store, &parsed);
+        Ok(Response::new(rows_to_proto(rows)))
     }
 
     async fn follow_sql(
@@ -72,43 +94,41 @@ impl QueryServiceTrait for QueryGrpcService {
             .map_err(|e| Status::invalid_argument(format!("SQL parse error: {}", e)))?;
 
         let target = parsed.table.clone();
+        let projection = parsed.projection.clone();
         let store = self.store.clone();
 
-        // Initial query
+        // Initial query: eval → track last_ts → project
         let initial_result = {
             let s = store.read().await;
-            crate::query::sql::execute(&s, &parsed)
+            crate::query::sql::eval(&s, &parsed)
         };
 
-        // Track latest timestamp for delta queries
         let mut last_ts: u64 = match &initial_result {
-            QueryResult::Logs(logs) => logs
+            crate::query::QueryResult::Logs(logs) => logs
                 .iter()
                 .map(crate::store::log_sort_key)
                 .max()
                 .unwrap_or(0),
-            QueryResult::Metrics(metrics) => metrics
+            crate::query::QueryResult::Metrics(metrics) => metrics
                 .iter()
                 .map(crate::store::metric_sort_key)
                 .max()
                 .unwrap_or(0),
-            QueryResult::Traces(_) => {
+            crate::query::QueryResult::Traces(_) => {
                 let s = store.read().await;
                 s.current_trace_version()
             }
         };
+
+        let initial_rows = crate::query::sql::project(&initial_result, &projection);
 
         let event_rx = store.read().await.subscribe();
         let event_stream = BroadcastStream::new(event_rx);
 
         let stream = async_stream::try_stream! {
             // Send initial batch
-            let initial_response = to_sql_response(initial_result);
-            if !initial_response.trace_groups.is_empty()
-                || !initial_response.resource_logs.is_empty()
-                || !initial_response.resource_metrics.is_empty()
-            {
-                yield initial_response;
+            if !initial_rows.is_empty() {
+                yield rows_to_proto(initial_rows);
             }
 
             // Wait for new events
@@ -130,24 +150,14 @@ impl QueryServiceTrait for QueryGrpcService {
                 }
 
                 let s = store.read().await;
-                let response = match &target {
+                let rows = match &target {
                     TargetTable::Traces => {
                         let groups = s.query_traces_since_version(last_ts);
                         last_ts = s.current_trace_version();
                         if groups.is_empty() {
                             continue;
                         }
-                        SqlQueryResponse {
-                            trace_groups: groups
-                                .into_iter()
-                                .map(|g| crate::proto::otelcli::query::v1::TraceGroup {
-                                    trace_id: g.trace_id,
-                                    resource_spans: g.resource_spans,
-                                })
-                                .collect(),
-                            resource_logs: vec![],
-                            resource_metrics: vec![],
-                        }
+                        crate::query::sql::project_traces(&groups, &projection)
                     }
                     TargetTable::Logs => {
                         let logs = s.query_logs_since(last_ts + 1);
@@ -157,11 +167,7 @@ impl QueryServiceTrait for QueryGrpcService {
                         if let Some(max_ts) = logs.iter().map(crate::store::log_sort_key).max() {
                             last_ts = max_ts;
                         }
-                        SqlQueryResponse {
-                            trace_groups: vec![],
-                            resource_logs: logs,
-                            resource_metrics: vec![],
-                        }
+                        crate::query::sql::project_logs(&logs, &projection)
                     }
                     TargetTable::Metrics => {
                         let metrics = s.query_metrics_since(last_ts + 1);
@@ -173,14 +179,144 @@ impl QueryServiceTrait for QueryGrpcService {
                         {
                             last_ts = max_ts;
                         }
-                        SqlQueryResponse {
-                            trace_groups: vec![],
-                            resource_logs: vec![],
-                            resource_metrics: metrics,
-                        }
+                        crate::query::sql::project_metrics(&metrics, &projection)
                     }
                 };
-                yield response;
+                yield rows_to_proto(rows);
+            }
+        };
+
+        Ok(Response::new(Box::pin(stream)))
+    }
+
+    async fn follow_traces(
+        &self,
+        _request: Request<FollowRequest>,
+    ) -> Result<Response<Self::FollowTracesStream>, Status> {
+        let store = self.store.clone();
+
+        let initial_groups = {
+            let s = store.read().await;
+            s.all_traces().iter().cloned().collect::<Vec<_>>()
+        };
+        let mut last_version = store.read().await.current_trace_version();
+
+        let event_rx = store.read().await.subscribe();
+        let event_stream = BroadcastStream::new(event_rx);
+
+        let stream = async_stream::try_stream! {
+            if !initial_groups.is_empty() {
+                let resource_spans = initial_groups
+                    .into_iter()
+                    .flat_map(|g| g.resource_spans)
+                    .collect();
+                yield FollowTracesResponse { resource_spans };
+            }
+
+            tokio::pin!(event_stream);
+            while let Some(event_result) = event_stream.next().await {
+                if !matches!(event_result, Ok(StoreEvent::TracesAdded)) {
+                    continue;
+                }
+                let s = store.read().await;
+                let groups = s.query_traces_since_version(last_version);
+                last_version = s.current_trace_version();
+                if groups.is_empty() {
+                    continue;
+                }
+                let resource_spans = groups
+                    .into_iter()
+                    .flat_map(|g| g.resource_spans)
+                    .collect();
+                yield FollowTracesResponse { resource_spans };
+            }
+        };
+
+        Ok(Response::new(Box::pin(stream)))
+    }
+
+    async fn follow_logs(
+        &self,
+        _request: Request<FollowRequest>,
+    ) -> Result<Response<Self::FollowLogsStream>, Status> {
+        let store = self.store.clone();
+
+        let initial_logs = {
+            let s = store.read().await;
+            s.all_logs().iter().cloned().collect::<Vec<_>>()
+        };
+        let mut last_ts: u64 = initial_logs
+            .iter()
+            .map(crate::store::log_sort_key)
+            .max()
+            .unwrap_or(0);
+
+        let event_rx = store.read().await.subscribe();
+        let event_stream = BroadcastStream::new(event_rx);
+
+        let stream = async_stream::try_stream! {
+            if !initial_logs.is_empty() {
+                yield FollowLogsResponse { resource_logs: initial_logs };
+            }
+
+            tokio::pin!(event_stream);
+            while let Some(event_result) = event_stream.next().await {
+                if !matches!(event_result, Ok(StoreEvent::LogsAdded)) {
+                    continue;
+                }
+                let s = store.read().await;
+                let logs = s.query_logs_since(last_ts + 1);
+                if logs.is_empty() {
+                    continue;
+                }
+                if let Some(max_ts) = logs.iter().map(crate::store::log_sort_key).max() {
+                    last_ts = max_ts;
+                }
+                yield FollowLogsResponse { resource_logs: logs };
+            }
+        };
+
+        Ok(Response::new(Box::pin(stream)))
+    }
+
+    async fn follow_metrics(
+        &self,
+        _request: Request<FollowRequest>,
+    ) -> Result<Response<Self::FollowMetricsStream>, Status> {
+        let store = self.store.clone();
+
+        let initial_metrics = {
+            let s = store.read().await;
+            s.all_metrics().iter().cloned().collect::<Vec<_>>()
+        };
+        let mut last_ts: u64 = initial_metrics
+            .iter()
+            .map(crate::store::metric_sort_key)
+            .max()
+            .unwrap_or(0);
+
+        let event_rx = store.read().await.subscribe();
+        let event_stream = BroadcastStream::new(event_rx);
+
+        let stream = async_stream::try_stream! {
+            if !initial_metrics.is_empty() {
+                yield FollowMetricsResponse { resource_metrics: initial_metrics };
+            }
+
+            tokio::pin!(event_stream);
+            while let Some(event_result) = event_stream.next().await {
+                if !matches!(event_result, Ok(StoreEvent::MetricsAdded)) {
+                    continue;
+                }
+                let s = store.read().await;
+                let metrics = s.query_metrics_since(last_ts + 1);
+                if metrics.is_empty() {
+                    continue;
+                }
+                if let Some(max_ts) = metrics.iter().map(crate::store::metric_sort_key).max() {
+                    last_ts = max_ts;
+                }
+                yield FollowMetricsResponse { resource_metrics: metrics };
             }
         };
 

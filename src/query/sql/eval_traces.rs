@@ -138,7 +138,7 @@ fn eval_where_expr_for_span(
     }
 }
 
-fn resolve_span_column(
+pub(crate) fn resolve_span_column(
     span: &Span,
     resource: &Option<crate::proto::opentelemetry::proto::resource::v1::Resource>,
     column: &ColumnRef,
@@ -331,6 +331,7 @@ mod tests {
         resource::v1::Resource,
         trace::v1::{ResourceSpans, ScopeSpans, Span, Status},
     };
+    use crate::query::sql::parser::Projection;
     use crate::query::TargetTable;
     use crate::store::Store;
 
@@ -409,7 +410,7 @@ mod tests {
             where_expr,
             limit: None,
             order_by: vec![],
-            select_all: true,
+            projection: Projection::All,
         }
     }
 

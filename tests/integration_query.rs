@@ -63,6 +63,17 @@ async fn start_servers(grpc_port: u16, query_port: u16) -> (store::SharedStore, 
     (shared_store, shutdown)
 }
 
+fn get_row_string(row: &otel_cli::proto::otelcli::query::v1::Row, name: &str) -> Option<String> {
+    row.columns.iter().find(|c| c.name == name).and_then(|c| {
+        c.value.as_ref().map(|v| match &v.value {
+            Some(any_value::Value::StringValue(s)) => s.clone(),
+            Some(any_value::Value::IntValue(i)) => i.to_string(),
+            Some(any_value::Value::DoubleValue(d)) => d.to_string(),
+            _ => String::new(),
+        })
+    })
+}
+
 #[tokio::test]
 async fn test_sql_query_traces_with_service_filter() {
     let grpc_port = get_available_port();
@@ -118,12 +129,9 @@ async fn test_sql_query_traces_with_service_filter() {
         .await
         .unwrap();
 
-    let trace_groups = response.into_inner().trace_groups;
-    assert_eq!(trace_groups.len(), 1);
-    assert_eq!(
-        trace_groups[0].resource_spans[0].scope_spans[0].spans[0].name,
-        "span-a"
-    );
+    let rows = response.into_inner().rows;
+    assert_eq!(rows.len(), 1);
+    assert_eq!(get_row_string(&rows[0], "span_name").unwrap(), "span-a");
 }
 
 #[tokio::test]
@@ -179,9 +187,9 @@ async fn test_sql_query_logs_with_severity_filter() {
         .await
         .unwrap();
 
-    let logs = response.into_inner().resource_logs;
-    assert_eq!(logs.len(), 1);
-    assert_eq!(logs[0].scope_logs[0].log_records[0].severity_text, "ERROR");
+    let rows = response.into_inner().rows;
+    assert_eq!(rows.len(), 1);
+    assert_eq!(get_row_string(&rows[0], "severity").unwrap(), "ERROR");
 }
 
 #[tokio::test]
@@ -225,18 +233,14 @@ async fn test_sql_query_logs_severity_ge() {
         .await
         .unwrap();
 
-    let logs = response.into_inner().resource_logs;
-    assert_eq!(logs.len(), 2);
-    let mut sev_numbers: Vec<i32> = logs
+    let rows = response.into_inner().rows;
+    assert_eq!(rows.len(), 2);
+    let mut severities: Vec<String> = rows
         .iter()
-        .flat_map(|rl| {
-            rl.scope_logs
-                .iter()
-                .flat_map(|sl| sl.log_records.iter().map(|lr| lr.severity_number))
-        })
+        .filter_map(|r| get_row_string(r, "severity"))
         .collect();
-    sev_numbers.sort();
-    assert_eq!(sev_numbers, vec![13, 17]);
+    severities.sort();
+    assert_eq!(severities, vec!["ERROR", "WARN"]);
 }
 
 #[tokio::test]
@@ -279,8 +283,8 @@ async fn test_sql_query_logs_with_service_name_filter() {
         .await
         .unwrap();
 
-    let logs = response.into_inner().resource_logs;
-    assert_eq!(logs.len(), 2);
+    let rows = response.into_inner().rows;
+    assert_eq!(rows.len(), 2);
 }
 
 #[tokio::test]
@@ -344,9 +348,12 @@ async fn test_sql_query_metrics_with_name_filter() {
         .await
         .unwrap();
 
-    let metrics = response.into_inner().resource_metrics;
-    assert_eq!(metrics.len(), 1);
-    assert_eq!(metrics[0].scope_metrics[0].metrics[0].name, "cpu_usage");
+    let rows = response.into_inner().rows;
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        get_row_string(&rows[0], "metric_name").unwrap(),
+        "cpu_usage"
+    );
 }
 
 #[tokio::test]
@@ -399,9 +406,9 @@ async fn test_follow_sql_traces() {
         .unwrap()
         .unwrap()
         .unwrap();
-    assert_eq!(initial.trace_groups.len(), 1);
+    assert_eq!(initial.rows.len(), 1);
     assert_eq!(
-        initial.trace_groups[0].resource_spans[0].scope_spans[0].spans[0].name,
+        get_row_string(&initial.rows[0], "span_name").unwrap(),
         "span-1"
     );
 
@@ -434,5 +441,55 @@ async fn test_follow_sql_traces() {
         .unwrap()
         .unwrap()
         .unwrap();
-    assert!(!delta.trace_groups.is_empty());
+    assert!(!delta.rows.is_empty());
+}
+
+#[tokio::test]
+async fn test_sql_query_with_column_projection() {
+    let grpc_port = get_available_port();
+    let query_port = get_available_port();
+    let (_store, _shutdown) = start_servers(grpc_port, query_port).await;
+    let addr = format!("http://127.0.0.1:{}", grpc_port);
+    let query_addr = format!("http://127.0.0.1:{}", query_port);
+
+    // Ingest a trace
+    let mut trace_client = TraceServiceClient::connect(addr.clone()).await.unwrap();
+    trace_client
+        .export(ExportTraceServiceRequest {
+            resource_spans: vec![ResourceSpans {
+                resource: make_resource("svc-a"),
+                scope_spans: vec![ScopeSpans {
+                    scope: None,
+                    spans: vec![Span {
+                        trace_id: vec![1; 16],
+                        span_id: vec![1; 8],
+                        name: "test-span".into(),
+                        kind: 2,
+                        ..Default::default()
+                    }],
+                    schema_url: String::new(),
+                }],
+                schema_url: String::new(),
+            }],
+        })
+        .await
+        .unwrap();
+
+    // Query with specific columns
+    let mut query_client = QueryServiceClient::connect(query_addr).await.unwrap();
+    let response = query_client
+        .sql_query(SqlQueryRequest {
+            query: "SELECT span_name, service_name FROM traces".into(),
+        })
+        .await
+        .unwrap();
+
+    let rows = response.into_inner().rows;
+    assert_eq!(rows.len(), 1);
+    // Should have exactly 2 columns
+    assert_eq!(rows[0].columns.len(), 2);
+    assert_eq!(rows[0].columns[0].name, "span_name");
+    assert_eq!(rows[0].columns[1].name, "service_name");
+    assert_eq!(get_row_string(&rows[0], "span_name").unwrap(), "test-span");
+    assert_eq!(get_row_string(&rows[0], "service_name").unwrap(), "svc-a");
 }

@@ -16,6 +16,17 @@ use otel_cli::proto::otelcli::query::v1::{
 use otel_cli::store;
 use tokio_util::sync::CancellationToken;
 
+fn get_row_string(row: &otel_cli::proto::otelcli::query::v1::Row, name: &str) -> Option<String> {
+    row.columns.iter().find(|c| c.name == name).and_then(|c| {
+        c.value.as_ref().map(|v| match &v.value {
+            Some(any_value::Value::StringValue(s)) => s.clone(),
+            Some(any_value::Value::IntValue(i)) => i.to_string(),
+            Some(any_value::Value::DoubleValue(d)) => d.to_string(),
+            _ => String::new(),
+        })
+    })
+}
+
 fn get_available_port() -> u16 {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     listener.local_addr().unwrap().port()
@@ -109,13 +120,22 @@ async fn test_e2e_trace_query() {
         .await
         .unwrap();
 
-    let trace_groups = response.into_inner().trace_groups;
-    assert!(!trace_groups.is_empty(), "Expected non-empty trace results");
+    let rows = response.into_inner().rows;
+    assert!(!rows.is_empty(), "Expected non-empty trace results");
     assert_eq!(
-        trace_groups[0].resource_spans[0].scope_spans[0].spans[0].name,
-        "test-span"
+        get_row_string(&rows[0], "span_name").as_deref(),
+        Some("test-span")
     );
-    assert_eq!(trace_groups[0].trace_id, vec![0xab; 16]);
+    let expected_trace_id = vec![0xab_u8; 16]
+        .iter()
+        .map(|b| format!("{:02x}", b))
+        .collect::<String>();
+    assert!(
+        get_row_string(&rows[0], "trace_id")
+            .as_ref()
+            .map_or(false, |v| v.contains(&expected_trace_id)),
+        "trace_id should contain the hex of [0xab; 16]"
+    );
 }
 
 #[tokio::test]
@@ -165,9 +185,12 @@ async fn test_e2e_log_query() {
         .await
         .unwrap();
 
-    let logs = response.into_inner().resource_logs;
-    assert!(!logs.is_empty(), "Expected non-empty log results");
-    assert_eq!(logs[0].scope_logs[0].log_records[0].severity_text, "WARN");
+    let rows = response.into_inner().rows;
+    assert!(!rows.is_empty(), "Expected non-empty log results");
+    assert_eq!(
+        get_row_string(&rows[0], "severity").as_deref(),
+        Some("WARN")
+    );
 }
 
 #[tokio::test]
@@ -218,7 +241,10 @@ async fn test_e2e_metric_query() {
         .await
         .unwrap();
 
-    let metrics = response.into_inner().resource_metrics;
-    assert!(!metrics.is_empty(), "Expected non-empty metric results");
-    assert_eq!(metrics[0].scope_metrics[0].metrics[0].name, "request_count");
+    let rows = response.into_inner().rows;
+    assert!(!rows.is_empty(), "Expected non-empty metric results");
+    assert_eq!(
+        get_row_string(&rows[0], "metric_name").as_deref(),
+        Some("request_count")
+    );
 }

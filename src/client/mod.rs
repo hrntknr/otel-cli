@@ -87,6 +87,109 @@ pub fn parse_time_spec(s: &str) -> anyhow::Result<u64> {
         .ok_or_else(|| anyhow::anyhow!("timestamp out of range: {}", s))? as u64)
 }
 
+// --- Row display helpers ---
+
+use crate::proto::otelcli::query::v1::Row as ProtoRow;
+
+pub fn get_row_string(row: &ProtoRow, name: &str) -> Option<String> {
+    row.columns.iter().find(|c| c.name == name).and_then(|c| {
+        c.value
+            .as_ref()
+            .map(|v| extract_any_value_string(v))
+            .filter(|s| !s.is_empty())
+    })
+}
+
+pub fn get_row_kvlist<'a>(row: &'a ProtoRow, name: &str) -> Option<&'a [KeyValue]> {
+    row.columns.iter().find(|c| c.name == name).and_then(|c| {
+        c.value.as_ref().and_then(|v| match &v.value {
+            Some(any_value::Value::KvlistValue(kvl)) => Some(kvl.values.as_slice()),
+            _ => None,
+        })
+    })
+}
+
+pub fn print_kvlist(kvs: &[KeyValue], label: &str, indent: &str) {
+    if !kvs.is_empty() {
+        println!("{}{}:", indent, label);
+        for kv in kvs {
+            let val = kv
+                .value
+                .as_ref()
+                .map(extract_any_value_string)
+                .unwrap_or_default();
+            println!("{}  {}: {}", indent, kv.key, val);
+        }
+    }
+}
+
+pub fn row_to_json(row: &ProtoRow) -> serde_json::Value {
+    let mut map = serde_json::Map::new();
+    for col in &row.columns {
+        let value = match &col.value {
+            Some(v) => any_value_to_json(v),
+            None => serde_json::Value::Null,
+        };
+        map.insert(col.name.clone(), value);
+    }
+    serde_json::Value::Object(map)
+}
+
+pub fn print_rows_jsonl(rows: &[ProtoRow]) -> anyhow::Result<()> {
+    for row in rows {
+        println!("{}", serde_json::to_string(&row_to_json(row))?);
+    }
+    Ok(())
+}
+
+pub fn print_rows_csv(rows: &[ProtoRow], show_header: bool) {
+    if rows.is_empty() {
+        return;
+    }
+    if show_header {
+        let headers: Vec<&str> = rows[0].columns.iter().map(|c| c.name.as_str()).collect();
+        println!("{}", headers.join(","));
+    }
+    for row in rows {
+        let cells: Vec<String> = row
+            .columns
+            .iter()
+            .map(|c| match &c.value {
+                Some(v) => csv_escape(&format_any_value_for_csv(v)),
+                None => String::new(),
+            })
+            .collect();
+        println!("{}", cells.join(","));
+    }
+}
+
+fn format_any_value_for_csv(value: &AnyValue) -> String {
+    match &value.value {
+        Some(any_value::Value::KvlistValue(kvl)) => kvl
+            .values
+            .iter()
+            .map(|kv| {
+                let val = kv
+                    .value
+                    .as_ref()
+                    .map(extract_any_value_string)
+                    .unwrap_or_default();
+                format!("{}={}", kv.key, val)
+            })
+            .collect::<Vec<_>>()
+            .join(", "),
+        _ => extract_any_value_string(value),
+    }
+}
+
+fn csv_escape(field: &str) -> String {
+    if field.contains(',') || field.contains('"') || field.contains('\n') {
+        format!("\"{}\"", field.replace('"', "\"\""))
+    } else {
+        field.to_string()
+    }
+}
+
 pub fn format_attributes_json(attributes: &[KeyValue]) -> serde_json::Value {
     let map: serde_json::Map<String, serde_json::Value> = attributes
         .iter()
@@ -98,7 +201,7 @@ pub fn format_attributes_json(attributes: &[KeyValue]) -> serde_json::Value {
     serde_json::Value::Object(map)
 }
 
-fn any_value_to_json(value: &AnyValue) -> serde_json::Value {
+pub(crate) fn any_value_to_json(value: &AnyValue) -> serde_json::Value {
     match &value.value {
         Some(any_value::Value::StringValue(s)) => serde_json::Value::String(s.clone()),
         Some(any_value::Value::BoolValue(b)) => serde_json::Value::Bool(*b),

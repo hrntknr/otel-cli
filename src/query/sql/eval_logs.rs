@@ -164,6 +164,14 @@ fn eval_where_expr_for_log(
     }
 }
 
+pub(crate) fn resolve_log_column_pub(
+    lr: &LogRecord,
+    resource: &Option<crate::proto::opentelemetry::proto::resource::v1::Resource>,
+    column: &ColumnRef,
+) -> FieldValue {
+    resolve_log_column(lr, resource, column)
+}
+
 fn resolve_log_column(
     lr: &LogRecord,
     resource: &Option<crate::proto::opentelemetry::proto::resource::v1::Resource>,
@@ -203,6 +211,7 @@ mod tests {
         logs::v1::{LogRecord, ResourceLogs, ScopeLogs},
         resource::v1::Resource,
     };
+    use crate::query::sql::parser::Projection;
     use crate::query::TargetTable;
     use crate::store::Store;
 
@@ -262,7 +271,7 @@ mod tests {
             where_expr,
             limit: None,
             order_by: vec![],
-            select_all: true,
+            projection: Projection::All,
         }
     }
 

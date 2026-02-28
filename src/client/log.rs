@@ -1,12 +1,10 @@
 use crate::cli::OutputFormat;
-use crate::proto::opentelemetry::proto::logs::v1::ResourceLogs;
 use crate::proto::otelcli::query::v1::query_service_client::QueryServiceClient;
-use crate::proto::otelcli::query::v1::SqlQueryRequest;
+use crate::proto::otelcli::query::v1::{Row as ProtoRow, SqlQueryRequest};
 use crate::query::sql::convert::log_flags_to_sql;
 
 use super::{
-    extract_any_value_string, format_attributes_json, format_timestamp, get_resource_attributes,
-    parse_time_spec,
+    get_row_kvlist, get_row_string, parse_time_spec, print_kvlist, print_rows_csv, print_rows_jsonl,
 };
 
 #[allow(clippy::too_many_arguments)]
@@ -38,12 +36,9 @@ pub async fn query_logs(
         .into_inner();
 
     match format {
-        OutputFormat::Json => {
-            print_logs_json(&response.resource_logs)?;
-        }
-        OutputFormat::Text => {
-            print_logs_text(&response.resource_logs);
-        }
+        OutputFormat::Jsonl => print_rows_jsonl(&response.rows)?,
+        OutputFormat::Csv => print_rows_csv(&response.rows, true),
+        OutputFormat::Text => print_log_rows_text(&response.rows),
     }
 
     Ok(())
@@ -77,91 +72,51 @@ pub async fn follow_logs(
         .await?
         .into_inner();
 
+    let mut csv_header_shown = false;
     while let Some(msg) = stream.message().await? {
         match format {
-            OutputFormat::Json => {
-                print_logs_json(&msg.resource_logs)?;
+            OutputFormat::Jsonl => print_rows_jsonl(&msg.rows)?,
+            OutputFormat::Csv => {
+                print_rows_csv(&msg.rows, !csv_header_shown);
+                csv_header_shown = true;
             }
-            OutputFormat::Text => {
-                print_logs_text(&msg.resource_logs);
-            }
+            OutputFormat::Text => print_log_rows_text(&msg.rows),
         }
     }
 
     Ok(())
 }
 
-pub fn print_logs_text(resource_logs: &[ResourceLogs]) {
-    for rl in resource_logs {
-        let resource_attrs = get_resource_attributes(&rl.resource);
-        for sl in &rl.scope_logs {
-            for lr in &sl.log_records {
-                let timestamp = format_timestamp(lr.time_unix_nano);
-                let severity = &lr.severity_text;
-                let body = lr
-                    .body
-                    .as_ref()
-                    .map(extract_any_value_string)
-                    .unwrap_or_default();
+pub fn print_log_rows_text(rows: &[ProtoRow]) {
+    for row in rows {
+        // Header line: {timestamp} [{severity}] {body}
+        let timestamp = get_row_string(row, "timestamp").unwrap_or_default();
+        let severity = get_row_string(row, "severity").unwrap_or_default();
+        let body = get_row_string(row, "body").unwrap_or_default();
 
-                println!("{} [{}] {}", timestamp, severity, body);
-                if !resource_attrs.is_empty() {
-                    println!("  Resource:");
-                    for kv in resource_attrs {
-                        let val = kv
-                            .value
-                            .as_ref()
-                            .map(extract_any_value_string)
-                            .unwrap_or_default();
-                        println!("    {}: {}", kv.key, val);
-                    }
-                }
-                if !lr.attributes.is_empty() {
-                    println!("  Attributes:");
-                    for kv in &lr.attributes {
-                        let val = kv
-                            .value
-                            .as_ref()
-                            .map(extract_any_value_string)
-                            .unwrap_or_default();
-                        println!("    {}: {}", kv.key, val);
-                    }
-                }
-            }
+        let has_timestamp = !timestamp.is_empty();
+        let has_severity = !severity.is_empty();
+        let has_body = !body.is_empty();
+
+        match (has_timestamp, has_severity, has_body) {
+            (true, true, true) => println!("{} [{}] {}", timestamp, severity, body),
+            (true, true, false) => println!("{} [{}]", timestamp, severity),
+            (true, false, true) => println!("{} {}", timestamp, body),
+            (true, false, false) => println!("{}", timestamp),
+            (false, true, true) => println!("[{}] {}", severity, body),
+            (false, true, false) => println!("[{}]", severity),
+            (false, false, true) => println!("{}", body),
+            (false, false, false) => {}
+        }
+
+        // Resource
+        if let Some(kvs) = get_row_kvlist(row, "resource") {
+            print_kvlist(kvs, "Resource", "  ");
+        }
+
+        // Attributes
+        if let Some(kvs) = get_row_kvlist(row, "attributes") {
+            print_kvlist(kvs, "Attributes", "  ");
         }
     }
-}
-
-fn build_logs_value(resource_logs: &[ResourceLogs]) -> Vec<serde_json::Value> {
-    let mut logs = Vec::new();
-
-    for rl in resource_logs {
-        let resource_attrs = get_resource_attributes(&rl.resource);
-        for sl in &rl.scope_logs {
-            for lr in &sl.log_records {
-                let body = lr
-                    .body
-                    .as_ref()
-                    .map(extract_any_value_string)
-                    .unwrap_or_default();
-
-                let entry = serde_json::json!({
-                    "timestamp": format_timestamp(lr.time_unix_nano),
-                    "severity": lr.severity_text,
-                    "body": body,
-                    "resource_attributes": format_attributes_json(resource_attrs),
-                    "attributes": format_attributes_json(&lr.attributes),
-                });
-                logs.push(entry);
-            }
-        }
-    }
-
-    logs
-}
-
-pub fn print_logs_json(resource_logs: &[ResourceLogs]) -> anyhow::Result<()> {
-    let logs = build_logs_value(resource_logs);
-    println!("{}", serde_json::to_string_pretty(&logs)?);
-    Ok(())
 }

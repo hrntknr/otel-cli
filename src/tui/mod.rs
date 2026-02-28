@@ -1054,7 +1054,7 @@ impl App {
             let all: Vec<_> = store.all_logs().iter().cloned().collect();
             let log_query = log_filter_to_sql(&self.log_filter);
             let filtered = match crate::query::sql::parse(&log_query) {
-                Ok(parsed) => match crate::query::sql::execute(&store, &parsed) {
+                Ok(parsed) => match crate::query::sql::eval(&store, &parsed) {
                     crate::query::QueryResult::Logs(l) => l,
                     _ => all.clone(),
                 },

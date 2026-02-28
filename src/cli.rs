@@ -59,7 +59,7 @@ Examples:
   $ otel-cli log                                 List recent logs
   $ otel-cli log --severity ERROR                Filter by severity
   $ otel-cli log --service myapp -f              Follow logs for a service
-  $ otel-cli log --format json --since 10m       JSON output, last 10 minutes")]
+  $ otel-cli log --format jsonl --since 10m       JSONL output, last 10 minutes")]
     Log {
         /// Server address
         #[arg(long, default_value = "http://localhost:4319")]
@@ -168,7 +168,7 @@ Examples:
   $ otel-cli metrics                             List recent metrics
   $ otel-cli metrics --name http_requests_total  Filter by metric name
   $ otel-cli metrics --service myapp -f          Follow metrics for a service
-  $ otel-cli metrics --format json               JSON output")]
+  $ otel-cli metrics --format jsonl               JSONL output")]
     Metrics {
         /// Server address
         #[arg(long, default_value = "http://localhost:4319")]
@@ -201,7 +201,7 @@ Examples:
   $ otel-cli sql \"SELECT * FROM traces\"
   $ otel-cli sql \"SELECT * FROM logs WHERE severity >= 'ERROR'\"
   $ otel-cli sql -f \"SELECT * FROM logs\"          Follow mode
-  $ otel-cli sql \"SELECT * FROM metrics\" --format json")]
+  $ otel-cli sql \"SELECT * FROM metrics\" --format jsonl")]
     Sql {
         /// Server address
         #[arg(long, default_value = "http://localhost:4319")]
@@ -234,7 +234,8 @@ Examples:
 #[derive(clap::ValueEnum, Clone, Debug)]
 pub enum OutputFormat {
     Text,
-    Json,
+    Jsonl,
+    Csv,
 }
 
 fn parse_key_val(s: &str) -> Result<(String, String), String> {
@@ -317,7 +318,7 @@ mod tests {
             "--limit",
             "50",
             "--format",
-            "json",
+            "jsonl",
         ]);
         match cli.command {
             Commands::Log {
@@ -342,7 +343,7 @@ mod tests {
                 assert!(since.is_none());
                 assert!(until.is_none());
                 assert_eq!(limit, 50);
-                assert!(matches!(format, OutputFormat::Json));
+                assert!(matches!(format, OutputFormat::Jsonl));
             }
             _ => panic!("Expected Log command"),
         }

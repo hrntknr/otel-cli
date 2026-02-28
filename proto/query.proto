@@ -2,22 +2,20 @@ syntax = "proto3";
 
 package otelcli.query.v1;
 
+import "opentelemetry/proto/common/v1/common.proto";
 import "opentelemetry/proto/trace/v1/trace.proto";
 import "opentelemetry/proto/logs/v1/logs.proto";
 import "opentelemetry/proto/metrics/v1/metrics.proto";
-import "opentelemetry/proto/resource/v1/resource.proto";
 
 service QueryService {
   rpc SqlQuery(SqlQueryRequest) returns (SqlQueryResponse);
   rpc FollowSql(SqlQueryRequest) returns (stream SqlQueryResponse);
+  rpc FollowTraces(FollowRequest) returns (stream FollowTracesResponse);
+  rpc FollowLogs(FollowRequest) returns (stream FollowLogsResponse);
+  rpc FollowMetrics(FollowRequest) returns (stream FollowMetricsResponse);
   rpc ClearTraces(ClearTracesRequest) returns (ClearResponse);
   rpc ClearLogs(ClearLogsRequest) returns (ClearResponse);
   rpc ClearMetrics(ClearMetricsRequest) returns (ClearResponse);
-}
-
-message TraceGroup {
-  bytes trace_id = 1;
-  repeated opentelemetry.proto.trace.v1.ResourceSpans resource_spans = 2;
 }
 
 message SqlQueryRequest {
@@ -25,9 +23,30 @@ message SqlQueryRequest {
 }
 
 message SqlQueryResponse {
-  repeated TraceGroup trace_groups = 1;
-  repeated opentelemetry.proto.logs.v1.ResourceLogs resource_logs = 2;
-  repeated opentelemetry.proto.metrics.v1.ResourceMetrics resource_metrics = 3;
+  repeated Row rows = 1;
+}
+
+message Row {
+  repeated ColumnValue columns = 1;
+}
+
+message ColumnValue {
+  string name = 1;
+  opentelemetry.proto.common.v1.AnyValue value = 2;
+}
+
+message FollowRequest {}
+
+message FollowTracesResponse {
+  repeated opentelemetry.proto.trace.v1.ResourceSpans resource_spans = 1;
+}
+
+message FollowLogsResponse {
+  repeated opentelemetry.proto.logs.v1.ResourceLogs resource_logs = 1;
+}
+
+message FollowMetricsResponse {
+  repeated opentelemetry.proto.metrics.v1.ResourceMetrics resource_metrics = 1;
 }
 
 message ClearTracesRequest {}

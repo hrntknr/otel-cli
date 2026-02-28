@@ -61,13 +61,19 @@ pub enum SqlValue {
     Boolean(bool),
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub enum Projection {
+    All,
+    Columns(Vec<ColumnRef>),
+}
+
 #[derive(Debug, Clone)]
 pub struct SqlQuery {
     pub table: TargetTable,
     pub where_expr: Option<WhereExpr>,
     pub limit: Option<usize>,
     pub order_by: Vec<OrderByItem>,
-    pub select_all: bool,
+    pub projection: Projection,
 }
 
 #[derive(Debug, Clone)]
@@ -93,9 +99,28 @@ pub fn parse(sql: &str) -> Result<SqlQuery, String> {
         return Err("expected a SELECT expression".to_string());
     };
 
-    // Extract SELECT *
-    let select_all =
-        select.projection.len() == 1 && matches!(select.projection[0], SelectItem::Wildcard(_));
+    // Extract SELECT projection
+    let projection = if select.projection.len() == 1
+        && matches!(select.projection[0], SelectItem::Wildcard(_))
+    {
+        Projection::All
+    } else {
+        let mut cols = Vec::new();
+        for item in &select.projection {
+            match item {
+                SelectItem::UnnamedExpr(expr) => {
+                    cols.push(extract_column_ref(expr)?);
+                }
+                SelectItem::Wildcard(_) => {
+                    return Err("wildcard (*) must be the only select item".to_string());
+                }
+                _ => {
+                    return Err(format!("unsupported select item: {:?}", item));
+                }
+            }
+        }
+        Projection::Columns(cols)
+    };
 
     // Extract FROM clause → TargetTable
     if select.from.len() != 1 {
@@ -132,7 +157,7 @@ pub fn parse(sql: &str) -> Result<SqlQuery, String> {
         where_expr,
         limit,
         order_by,
-        select_all,
+        projection,
     })
 }
 
@@ -301,6 +326,8 @@ fn extract_column_ref(expr: &Expr) -> Result<ColumnRef, String> {
                             return Err(format!("subscript key must be a string: {:?}", v));
                         }
                     },
+                    // GenericDialect parses double-quoted strings as identifiers
+                    Expr::Identifier(ident) => ident.value.clone(),
                     _ => {
                         return Err(format!(
                             "unsupported subscript index expression: {:?}",
@@ -366,10 +393,36 @@ mod tests {
     fn parse_simple_select_all_from_traces() {
         let q = parse("SELECT * FROM traces").unwrap();
         assert!(matches!(q.table, TargetTable::Traces));
-        assert!(q.select_all);
+        assert_eq!(q.projection, Projection::All);
         assert!(q.where_expr.is_none());
         assert!(q.limit.is_none());
         assert!(q.order_by.is_empty());
+    }
+
+    #[test]
+    fn parse_select_specific_columns() {
+        let q = parse("SELECT timestamp, resource FROM logs").unwrap();
+        assert!(matches!(q.table, TargetTable::Logs));
+        assert_eq!(
+            q.projection,
+            Projection::Columns(vec![
+                ColumnRef::Named("timestamp".to_string()),
+                ColumnRef::Named("resource".to_string()),
+            ])
+        );
+    }
+
+    #[test]
+    fn parse_select_bracket_access_column() {
+        let q = parse("SELECT resource['service.name'], attributes['http.method'] FROM traces")
+            .unwrap();
+        assert_eq!(
+            q.projection,
+            Projection::Columns(vec![
+                ColumnRef::BracketAccess("resource".to_string(), "service.name".to_string()),
+                ColumnRef::BracketAccess("attributes".to_string(), "http.method".to_string()),
+            ])
+        );
     }
 
     #[test]
@@ -661,6 +714,24 @@ mod tests {
                 column: ColumnRef::Named("kind".to_string()),
                 op: CompOp::Eq,
                 value: SqlValue::Number(2.0),
+            }
+        );
+    }
+
+    #[test]
+    fn parse_double_quoted_bracket_access() {
+        let q =
+            parse(r#"SELECT * FROM logs WHERE resource["service.name"] = "user-service""#).unwrap();
+        let expr = q.where_expr.unwrap();
+        assert_eq!(
+            expr,
+            WhereExpr::Comparison {
+                column: ColumnRef::BracketAccess(
+                    "resource".to_string(),
+                    "service.name".to_string()
+                ),
+                op: CompOp::Eq,
+                value: SqlValue::String("user-service".to_string()),
             }
         );
     }

@@ -417,7 +417,7 @@ mod tests {
         },
         resource::v1::Resource,
     };
-    use crate::query::sql::parser::SqlValue;
+    use crate::query::sql::parser::{Projection, SqlValue};
     use crate::query::TargetTable;
     use crate::store::Store;
 
@@ -477,7 +477,7 @@ mod tests {
             where_expr,
             limit: None,
             order_by: vec![],
-            select_all: true,
+            projection: Projection::All,
         }
     }
 

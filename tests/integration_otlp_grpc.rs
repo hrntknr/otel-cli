@@ -16,6 +16,17 @@ use otel_cli::proto::otelcli::query::v1::{
 use otel_cli::store;
 use tokio_util::sync::CancellationToken;
 
+fn get_row_string(row: &otel_cli::proto::otelcli::query::v1::Row, name: &str) -> Option<String> {
+    row.columns.iter().find(|c| c.name == name).and_then(|c| {
+        c.value.as_ref().map(|v| match &v.value {
+            Some(any_value::Value::StringValue(s)) => s.clone(),
+            Some(any_value::Value::IntValue(i)) => i.to_string(),
+            Some(any_value::Value::DoubleValue(d)) => d.to_string(),
+            _ => String::new(),
+        })
+    })
+}
+
 fn get_available_port() -> u16 {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     listener.local_addr().unwrap().port()
@@ -100,11 +111,11 @@ async fn test_grpc_trace_ingest_and_query() {
         .await
         .unwrap();
 
-    let trace_groups = query_response.into_inner().trace_groups;
-    assert_eq!(trace_groups.len(), 1);
+    let rows = query_response.into_inner().rows;
+    assert_eq!(rows.len(), 1);
     assert_eq!(
-        trace_groups[0].resource_spans[0].scope_spans[0].spans[0].name,
-        "test-span"
+        get_row_string(&rows[0], "span_name"),
+        Some("test-span".to_string())
     );
 }
 
@@ -144,9 +155,12 @@ async fn test_grpc_logs_ingest_and_query() {
         .await
         .unwrap();
 
-    let logs = query_response.into_inner().resource_logs;
-    assert_eq!(logs.len(), 1);
-    assert_eq!(logs[0].scope_logs[0].log_records[0].severity_text, "ERROR");
+    let rows = query_response.into_inner().rows;
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        get_row_string(&rows[0], "severity"),
+        Some("ERROR".to_string())
+    );
 }
 
 #[tokio::test]
@@ -192,7 +206,10 @@ async fn test_grpc_metrics_ingest_and_query() {
         .await
         .unwrap();
 
-    let metrics = query_response.into_inner().resource_metrics;
-    assert_eq!(metrics.len(), 1);
-    assert_eq!(metrics[0].scope_metrics[0].metrics[0].name, "cpu_usage");
+    let rows = query_response.into_inner().rows;
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        get_row_string(&rows[0], "metric_name"),
+        Some("cpu_usage".to_string())
+    );
 }

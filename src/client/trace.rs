@@ -1,11 +1,10 @@
 use crate::cli::OutputFormat;
 use crate::proto::otelcli::query::v1::query_service_client::QueryServiceClient;
-use crate::proto::otelcli::query::v1::{SqlQueryRequest, TraceGroup};
+use crate::proto::otelcli::query::v1::{Row as ProtoRow, SqlQueryRequest};
 use crate::query::sql::convert::trace_flags_to_sql;
 
 use super::{
-    extract_any_value_string, format_attributes_json, format_timestamp, get_resource_attributes,
-    hex_encode, parse_time_spec,
+    get_row_kvlist, get_row_string, parse_time_spec, print_kvlist, print_rows_csv, print_rows_jsonl,
 };
 
 #[allow(clippy::too_many_arguments)]
@@ -37,12 +36,9 @@ pub async fn query_traces(
         .into_inner();
 
     match format {
-        OutputFormat::Json => {
-            print_traces_json(&response.trace_groups)?;
-        }
-        OutputFormat::Text => {
-            print_traces_text(&response.trace_groups);
-        }
+        OutputFormat::Jsonl => print_rows_jsonl(&response.rows)?,
+        OutputFormat::Csv => print_rows_csv(&response.rows, true),
+        OutputFormat::Text => print_trace_rows_text(&response.rows),
     }
 
     Ok(())
@@ -77,102 +73,61 @@ pub async fn follow_traces(
         .await?
         .into_inner();
 
+    let mut csv_header_shown = false;
     while let Some(msg) = stream.message().await? {
         match format {
-            OutputFormat::Json => {
-                print_traces_json(&msg.trace_groups)?;
+            OutputFormat::Jsonl => print_rows_jsonl(&msg.rows)?,
+            OutputFormat::Csv => {
+                print_rows_csv(&msg.rows, !csv_header_shown);
+                csv_header_shown = true;
             }
-            OutputFormat::Text => {
-                print_traces_text(&msg.trace_groups);
-            }
+            OutputFormat::Text => print_trace_rows_text(&msg.rows),
         }
     }
 
     Ok(())
 }
 
-pub fn print_traces_text(trace_groups: &[TraceGroup]) {
-    for group in trace_groups {
-        let trace_id = hex_encode(&group.trace_id);
-        println!("Trace: {}", trace_id);
-        for rs in &group.resource_spans {
-            let resource_attrs = get_resource_attributes(&rs.resource);
-            for ss in &rs.scope_spans {
-                for span in &ss.spans {
-                    let span_id = hex_encode(&span.span_id);
-                    let status_code = span.status.as_ref().map(|s| s.code).unwrap_or(0);
-                    let duration = span
-                        .end_time_unix_nano
-                        .saturating_sub(span.start_time_unix_nano);
+pub fn print_trace_rows_text(rows: &[ProtoRow]) {
+    for row in rows {
+        // Header: Trace: {trace_id}
+        if let Some(trace_id) = get_row_string(row, "trace_id") {
+            println!("Trace: {}", trace_id);
+        }
 
-                    println!("  Span: {} [{}]", span.name, span_id);
-                    println!("    Status: {}", status_code);
-                    println!(
-                        "    Start: {} Duration: {}ns",
-                        format_timestamp(span.start_time_unix_nano),
-                        duration
-                    );
-                    if !resource_attrs.is_empty() {
-                        println!("    Resource:");
-                        for kv in resource_attrs {
-                            let val = kv
-                                .value
-                                .as_ref()
-                                .map(extract_any_value_string)
-                                .unwrap_or_default();
-                            println!("      {}: {}", kv.key, val);
-                        }
-                    }
-                    if !span.attributes.is_empty() {
-                        println!("    Attributes:");
-                        for kv in &span.attributes {
-                            let val = kv
-                                .value
-                                .as_ref()
-                                .map(extract_any_value_string)
-                                .unwrap_or_default();
-                            println!("      {}: {}", kv.key, val);
-                        }
-                    }
-                }
-            }
+        // Span line
+        let span_name = get_row_string(row, "span_name");
+        let span_id = get_row_string(row, "span_id");
+        match (span_name.as_deref(), span_id.as_deref()) {
+            (Some(name), Some(id)) => println!("  Span: {} [{}]", name, id),
+            (Some(name), None) => println!("  Span: {}", name),
+            (None, Some(id)) => println!("  Span: [{}]", id),
+            _ => {}
+        }
+
+        // Status
+        if let Some(status) = get_row_string(row, "status_code") {
+            println!("    Status: {}", status);
+        }
+
+        // Start time and duration
+        let start_time = get_row_string(row, "start_time");
+        let duration = get_row_string(row, "duration_ns");
+        match (start_time.as_deref(), duration.as_deref()) {
+            (Some(st), Some(dur)) => println!("    Start: {} Duration: {}ns", st, dur),
+            (Some(st), None) => println!("    Start: {}", st),
+            (None, Some(dur)) => println!("    Duration: {}ns", dur),
+            _ => {}
+        }
+
+        // Resource
+        if let Some(kvs) = get_row_kvlist(row, "resource") {
+            print_kvlist(kvs, "Resource", "    ");
+        }
+
+        // Attributes
+        if let Some(kvs) = get_row_kvlist(row, "attributes") {
+            print_kvlist(kvs, "Attributes", "    ");
         }
     }
-}
-
-fn build_traces_value(trace_groups: &[TraceGroup]) -> Vec<serde_json::Value> {
-    let mut traces = Vec::new();
-
-    for group in trace_groups {
-        let trace_id = hex_encode(&group.trace_id);
-        for rs in &group.resource_spans {
-            let resource_attrs = get_resource_attributes(&rs.resource);
-            for ss in &rs.scope_spans {
-                for span in &ss.spans {
-                    let span_id = hex_encode(&span.span_id);
-                    let status_code = span.status.as_ref().map(|s| s.code).unwrap_or(0);
-
-                    let entry = serde_json::json!({
-                        "trace_id": trace_id,
-                        "span_id": span_id,
-                        "resource_attributes": format_attributes_json(resource_attrs),
-                        "name": span.name,
-                        "status": status_code,
-                        "start_time": format_timestamp(span.start_time_unix_nano),
-                        "end_time": format_timestamp(span.end_time_unix_nano),
-                        "attributes": format_attributes_json(&span.attributes),
-                    });
-                    traces.push(entry);
-                }
-            }
-        }
-    }
-
-    traces
-}
-
-pub fn print_traces_json(trace_groups: &[TraceGroup]) -> anyhow::Result<()> {
-    let traces = build_traces_value(trace_groups);
-    println!("{}", serde_json::to_string_pretty(&traces)?);
-    Ok(())
 }
