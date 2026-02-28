@@ -82,6 +82,45 @@ pub struct OrderByItem {
     pub desc: bool,
 }
 
+const VALID_TRACE_COLUMNS: &[&str] = &[
+    "trace_id",
+    "span_id",
+    "parent_span_id",
+    "service_name",
+    "span_name",
+    "kind",
+    "status_code",
+    "start_time",
+    "end_time",
+    "duration_ns",
+    "resource",
+    "attributes",
+];
+
+const VALID_LOG_COLUMNS: &[&str] = &[
+    "timestamp",
+    "severity",
+    "severity_number",
+    "body",
+    "service_name",
+    "resource",
+    "attributes",
+];
+
+const VALID_METRIC_COLUMNS: &[&str] = &[
+    "timestamp",
+    "metric_name",
+    "type",
+    "value",
+    "count",
+    "sum",
+    "service_name",
+    "resource",
+    "attributes",
+];
+
+const VALID_BRACKET_BASES: &[&str] = &["attributes", "resource"];
+
 pub fn parse(sql: &str) -> Result<SqlQuery, String> {
     let dialect = GenericDialect {};
     let statements = Parser::parse_sql(&dialect, sql).map_err(|e| e.to_string())?;
@@ -115,7 +154,7 @@ pub fn parse(sql: &str) -> Result<SqlQuery, String> {
                     return Err("wildcard (*) must be the only select item".to_string());
                 }
                 _ => {
-                    return Err(format!("unsupported select item: {:?}", item));
+                    return Err(format!("unsupported select item: {}", item));
                 }
             }
         }
@@ -152,13 +191,17 @@ pub fn parse(sql: &str) -> Result<SqlQuery, String> {
         None => vec![],
     };
 
-    Ok(SqlQuery {
+    let query = SqlQuery {
         table,
         where_expr,
         limit,
         order_by,
         projection,
-    })
+    };
+
+    validate_columns(&query)?;
+
+    Ok(query)
 }
 
 fn table_factor_name(tf: &sqlparser::ast::TableFactor) -> Result<String, String> {
@@ -246,7 +289,7 @@ fn convert_expr(expr: &Expr) -> Result<WhereExpr, String> {
                 negated: true,
             })
         }
-        _ => Err(format!("unsupported expression: {:?}", expr)),
+        _ => Err(format!("unsupported expression: {}", expr)),
     }
 }
 
@@ -304,7 +347,7 @@ fn convert_binary_op(left: &Expr, op: &BinaryOperator, right: &Expr) -> Result<W
                 negated: true,
             })
         }
-        _ => Err(format!("unsupported operator: {:?}", op)),
+        _ => Err(format!("unsupported operator: {}", op)),
     }
 }
 
@@ -315,7 +358,7 @@ fn extract_column_ref(expr: &Expr) -> Result<ColumnRef, String> {
         Expr::Subscript { expr, subscript } => {
             let base = match expr.as_ref() {
                 Expr::Identifier(ident) => ident.value.clone(),
-                _ => return Err(format!("unsupported subscript base: {:?}", expr)),
+                _ => return Err(format!("unsupported subscript base: {}", expr)),
             };
             let key = match subscript.as_ref() {
                 Subscript::Index { index } => match index {
@@ -323,20 +366,17 @@ fn extract_column_ref(expr: &Expr) -> Result<ColumnRef, String> {
                         Value::SingleQuotedString(s) => s.clone(),
                         Value::DoubleQuotedString(s) => s.clone(),
                         _ => {
-                            return Err(format!("subscript key must be a string: {:?}", v));
+                            return Err(format!("subscript key must be a string: {}", v));
                         }
                     },
                     // GenericDialect parses double-quoted strings as identifiers
                     Expr::Identifier(ident) => ident.value.clone(),
                     _ => {
-                        return Err(format!(
-                            "unsupported subscript index expression: {:?}",
-                            index
-                        ));
+                        return Err(format!("unsupported subscript index expression: {}", index));
                     }
                 },
                 _ => {
-                    return Err(format!("unsupported subscript expression: {:?}", subscript));
+                    return Err(format!("unsupported subscript expression: {}", subscript));
                 }
             };
             Ok(ColumnRef::BracketAccess(base, key))
@@ -349,10 +389,17 @@ fn extract_column_ref(expr: &Expr) -> Result<ColumnRef, String> {
                     parts[1].value.clone(),
                 ))
             } else {
-                Err(format!("unsupported compound identifier: {:?}", parts))
+                Err(format!(
+                    "unsupported compound identifier: {}",
+                    parts
+                        .iter()
+                        .map(|p| p.value.as_str())
+                        .collect::<Vec<_>>()
+                        .join(".")
+                ))
             }
         }
-        _ => Err(format!("expected column reference, got: {:?}", expr)),
+        _ => Err(format!("expected column reference, got: {}", expr)),
     }
 }
 
@@ -369,12 +416,12 @@ fn extract_sql_value(expr: &Expr) -> Result<SqlValue, String> {
                 Ok(SqlValue::Number(f))
             }
             Value::Boolean(b) => Ok(SqlValue::Boolean(*b)),
-            _ => Err(format!("unsupported value: {:?}", v)),
+            _ => Err(format!("unsupported value: {}", v)),
         },
         // GenericDialect treats double-quoted strings as identifiers;
         // treat them as string literals for user convenience.
         Expr::Identifier(ident) => Ok(SqlValue::String(ident.value.clone())),
-        _ => Err(format!("expected a literal value, got: {:?}", expr)),
+        _ => Err(format!("expected a literal value, got: {}", expr)),
     }
 }
 
@@ -382,6 +429,86 @@ fn extract_string_value(expr: &Expr) -> Result<String, String> {
     match extract_sql_value(expr)? {
         SqlValue::String(s) => Ok(s),
         other => Err(format!("expected string value, got: {:?}", other)),
+    }
+}
+
+fn validate_columns(query: &SqlQuery) -> Result<(), String> {
+    let valid_columns = match query.table {
+        TargetTable::Traces => VALID_TRACE_COLUMNS,
+        TargetTable::Logs => VALID_LOG_COLUMNS,
+        TargetTable::Metrics => VALID_METRIC_COLUMNS,
+    };
+    let table_name = match query.table {
+        TargetTable::Traces => "traces",
+        TargetTable::Logs => "logs",
+        TargetTable::Metrics => "metrics",
+    };
+
+    let mut refs = Vec::new();
+    if let Some(expr) = &query.where_expr {
+        collect_column_refs(expr, &mut refs);
+    }
+    if let Projection::Columns(cols) = &query.projection {
+        refs.extend(cols.iter());
+    }
+
+    for col_ref in &refs {
+        validate_column_ref(col_ref, valid_columns, table_name)?;
+    }
+
+    for ob in &query.order_by {
+        if !valid_columns.contains(&ob.column.as_str()) {
+            return Err(format!(
+                "unknown column '{}' in ORDER BY for table '{}'",
+                ob.column, table_name
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_column_ref(
+    col_ref: &ColumnRef,
+    valid_columns: &[&str],
+    table_name: &str,
+) -> Result<(), String> {
+    match col_ref {
+        ColumnRef::Named(name) => {
+            if !valid_columns.contains(&name.as_str()) {
+                return Err(format!(
+                    "unknown column '{}' for table '{}'; valid columns: {}",
+                    name,
+                    table_name,
+                    valid_columns.join(", ")
+                ));
+            }
+        }
+        ColumnRef::BracketAccess(base, _) => {
+            if !VALID_BRACKET_BASES.contains(&base.as_str()) {
+                return Err(format!(
+                    "unknown column '{}' for bracket access; valid bases: {}",
+                    base,
+                    VALID_BRACKET_BASES.join(", ")
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn collect_column_refs<'a>(expr: &'a WhereExpr, refs: &mut Vec<&'a ColumnRef>) {
+    match expr {
+        WhereExpr::Comparison { column, .. }
+        | WhereExpr::Like { column, .. }
+        | WhereExpr::RegexMatch { column, .. }
+        | WhereExpr::InList { column, .. }
+        | WhereExpr::IsNull { column, .. } => refs.push(column),
+        WhereExpr::And(l, r) | WhereExpr::Or(l, r) => {
+            collect_column_refs(l, refs);
+            collect_column_refs(r, refs);
+        }
+        WhereExpr::Not(inner) => collect_column_refs(inner, refs),
     }
 }
 
@@ -734,5 +861,37 @@ mod tests {
                 value: SqlValue::String("user-service".to_string()),
             }
         );
+    }
+
+    #[test]
+    fn parse_unknown_column_in_where() {
+        let result = parse("SELECT * FROM traces WHERE nonexistent = 'x'");
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.contains("unknown column 'nonexistent'"), "{}", err);
+    }
+
+    #[test]
+    fn parse_unknown_column_in_select() {
+        let result = parse("SELECT nonexistent FROM logs");
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.contains("unknown column 'nonexistent'"), "{}", err);
+    }
+
+    #[test]
+    fn parse_unknown_column_in_order_by() {
+        let result = parse("SELECT * FROM metrics ORDER BY nonexistent");
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.contains("unknown column 'nonexistent'"), "{}", err);
+    }
+
+    #[test]
+    fn parse_unknown_bracket_base() {
+        let result = parse("SELECT * FROM traces WHERE unknown_base['key'] = 'x'");
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.contains("unknown column 'unknown_base'"), "{}", err);
     }
 }
