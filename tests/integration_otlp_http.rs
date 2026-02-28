@@ -11,6 +11,7 @@ use otel_cli::proto::opentelemetry::proto::{
 };
 use otel_cli::store;
 use prost::Message;
+use serde_json::json;
 use tokio_util::sync::CancellationToken;
 
 fn get_available_port() -> u16 {
@@ -169,6 +170,166 @@ async fn test_http_invalid_body() {
         .post(format!("http://127.0.0.1:{}/v1/traces", port))
         .header("Content-Type", "application/x-protobuf")
         .body(b"this is not valid protobuf".to_vec())
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), 400);
+}
+
+#[tokio::test]
+async fn test_http_json_trace_ingest() {
+    let port = get_available_port();
+    let (store, _shutdown) = start_http_server(port).await;
+
+    let body = json!({
+        "resourceSpans": [{
+            "resource": {
+                "attributes": [{
+                    "key": "service.name",
+                    "value": { "stringValue": "json-trace-svc" }
+                }]
+            },
+            "scopeSpans": [{
+                "spans": [{
+                    "traceId": "0102030405060708090a0b0c0d0e0f10",
+                    "spanId": "0102030405060708",
+                    "name": "json-span",
+                    "kind": 1,
+                    "startTimeUnixNano": "1000000",
+                    "endTimeUnixNano": "2000000"
+                }]
+            }]
+        }]
+    });
+
+    let client = reqwest::Client::new();
+    let response = client
+        .post(format!("http://127.0.0.1:{}/v1/traces", port))
+        .header("Content-Type", "application/json")
+        .body(body.to_string())
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), 200);
+    let content_type = response
+        .headers()
+        .get("content-type")
+        .unwrap()
+        .to_str()
+        .unwrap();
+    assert_eq!(content_type, "application/json");
+
+    let s = store.read().await;
+    let traces = s.query_traces_since_version(0);
+    assert_eq!(traces.len(), 1);
+    let span = &traces[0].resource_spans[0].scope_spans[0].spans[0];
+    assert_eq!(span.name, "json-span");
+    assert_eq!(
+        span.trace_id,
+        vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
+    );
+    assert_eq!(span.span_id, vec![1, 2, 3, 4, 5, 6, 7, 8]);
+}
+
+#[tokio::test]
+async fn test_http_json_logs_ingest() {
+    let port = get_available_port();
+    let (_store, _shutdown) = start_http_server(port).await;
+
+    let body = json!({
+        "resourceLogs": [{
+            "resource": {
+                "attributes": [{
+                    "key": "service.name",
+                    "value": { "stringValue": "json-log-svc" }
+                }]
+            },
+            "scopeLogs": [{
+                "logRecords": [{
+                    "severityText": "ERROR",
+                    "body": { "stringValue": "something failed" }
+                }]
+            }]
+        }]
+    });
+
+    let client = reqwest::Client::new();
+    let response = client
+        .post(format!("http://127.0.0.1:{}/v1/logs", port))
+        .header("Content-Type", "application/json")
+        .body(body.to_string())
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), 200);
+    let content_type = response
+        .headers()
+        .get("content-type")
+        .unwrap()
+        .to_str()
+        .unwrap();
+    assert_eq!(content_type, "application/json");
+}
+
+#[tokio::test]
+async fn test_http_json_metrics_ingest() {
+    let port = get_available_port();
+    let (_store, _shutdown) = start_http_server(port).await;
+
+    let body = json!({
+        "resourceMetrics": [{
+            "resource": {
+                "attributes": [{
+                    "key": "service.name",
+                    "value": { "stringValue": "json-metric-svc" }
+                }]
+            },
+            "scopeMetrics": [{
+                "metrics": [{
+                    "name": "cpu_usage",
+                    "gauge": {
+                        "dataPoints": [{
+                            "asDouble": 42.5,
+                            "timeUnixNano": "1000000"
+                        }]
+                    }
+                }]
+            }]
+        }]
+    });
+
+    let client = reqwest::Client::new();
+    let response = client
+        .post(format!("http://127.0.0.1:{}/v1/metrics", port))
+        .header("Content-Type", "application/json")
+        .body(body.to_string())
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), 200);
+    let content_type = response
+        .headers()
+        .get("content-type")
+        .unwrap()
+        .to_str()
+        .unwrap();
+    assert_eq!(content_type, "application/json");
+}
+
+#[tokio::test]
+async fn test_http_json_invalid_body() {
+    let port = get_available_port();
+    let (_store, _shutdown) = start_http_server(port).await;
+
+    let client = reqwest::Client::new();
+    let response = client
+        .post(format!("http://127.0.0.1:{}/v1/traces", port))
+        .header("Content-Type", "application/json")
+        .body("this is not valid json")
         .send()
         .await
         .unwrap();
