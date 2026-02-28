@@ -72,8 +72,8 @@ otel-cli trace --trace-id abc123def456
 # Filter by attributes
 otel-cli trace --attribute http.method=GET --attribute http.status_code=500
 
-# JSON output for programmatic processing
-otel-cli trace --format json
+# JSONL output for programmatic processing
+otel-cli trace --format jsonl
 
 # Time range queries
 otel-cli trace --since 5m
@@ -106,8 +106,8 @@ otel-cli log --service myapp --attribute environment=staging
 # Follow logs in real-time
 otel-cli log -f
 
-# JSON output
-otel-cli log --format json --since 10m
+# JSONL output
+otel-cli log --format jsonl --since 10m
 ```
 
 ### Query Metrics
@@ -125,7 +125,34 @@ otel-cli metrics --name http_requests_total
 otel-cli metrics --service myapp
 
 # Follow metrics in real-time
-otel-cli metrics -f --format json
+otel-cli metrics -f --format jsonl
+```
+
+### SQL Queries
+
+Run SQL queries against collected telemetry data. Supports `traces`, `logs`, and `metrics` tables.
+
+```bash
+# Query traces with SQL
+otel-cli sql "SELECT * FROM traces WHERE service_name = 'myapp'"
+
+# Query logs by severity
+otel-cli sql "SELECT * FROM logs WHERE severity >= 'ERROR'"
+
+# Select specific columns
+otel-cli sql "SELECT span_name, duration_ns FROM traces LIMIT 10"
+
+# Filter by attributes using bracket syntax
+otel-cli sql "SELECT * FROM traces WHERE attributes['http.method'] = 'GET'"
+
+# LIKE / regex matching
+otel-cli sql "SELECT * FROM logs WHERE body LIKE '%timeout%'"
+
+# Follow mode
+otel-cli sql -f "SELECT * FROM logs"
+
+# CSV output
+otel-cli sql "SELECT * FROM metrics" --format csv
 ```
 
 ### Clear Data
@@ -145,34 +172,84 @@ otel-cli clear --logs
 
 ## Common Options
 
-| Option | Description | Default |
-|---|---|---|
-| `--server <ADDR>` | Query server address | `http://localhost:4319` |
-| `--service <NAME>` | Filter by service name | — |
-| `--attribute <KEY=VALUE>` | Filter by attribute (repeatable) | — |
-| `--limit <N>` | Maximum results | `100` |
-| `--format <FORMAT>` | Output format: `text`, `json`, `toon` | `text` |
-| `-f, --follow` | Follow new data in real-time | — |
-| `--since <SPEC>` | Start of time range | — |
-| `--until <SPEC>` | End of time range | — |
+| Option                    | Description                           | Default                 |
+| ------------------------- | ------------------------------------- | ----------------------- |
+| `--server <ADDR>`         | Query server address                  | `http://localhost:4319` |
+| `--service <NAME>`        | Filter by service name                | —                       |
+| `--attribute <KEY=VALUE>` | Filter by attribute (repeatable)      | —                       |
+| `--limit <N>`             | Maximum results                       | `100`                   |
+| `--format <FORMAT>`       | Output format: `text`, `jsonl`, `csv` | `text`                  |
+| `-f, --follow`            | Follow new data in real-time          | —                       |
+| `--since <SPEC>`          | Start of time range                   | —                       |
+| `--until <SPEC>`          | End of time range                     | —                       |
 
 ## Time Specifications
 
 - **Relative:** `30s`, `5m`, `1h`, `2d` (interpreted as "now minus duration")
 - **Absolute:** RFC3339 format, e.g. `2024-01-01T00:00:00Z`
 
-## Filter Operators
+## SQL Tables and Columns
 
-Attribute filters support operators via syntax `--attribute key=value`:
+### traces
 
-- Equality matching by default
-- Multiple `--attribute` flags are combined with AND logic
+| Column           | Description                |
+| ---------------- | -------------------------- |
+| `trace_id`       | Hex-encoded trace ID       |
+| `span_id`        | Hex-encoded span ID        |
+| `parent_span_id` | Hex-encoded parent span ID |
+| `service_name`   | Service name from resource |
+| `span_name`      | Span operation name        |
+| `kind`           | Span kind                  |
+| `status_code`    | Status code                |
+| `start_time`     | Start timestamp (RFC3339)  |
+| `end_time`       | End timestamp (RFC3339)    |
+| `duration_ns`    | Duration in nanoseconds    |
+| `resource`       | Resource attributes        |
+| `attributes`     | Span attributes            |
+
+### logs
+
+| Column            | Description                      |
+| ----------------- | -------------------------------- |
+| `timestamp`       | Log timestamp (RFC3339)          |
+| `severity`        | Severity text (e.g. INFO, ERROR) |
+| `severity_number` | Numeric severity level           |
+| `body`            | Log body                         |
+| `service_name`    | Service name from resource       |
+| `resource`        | Resource attributes              |
+| `attributes`      | Log attributes                   |
+
+### metrics
+
+| Column         | Description                               |
+| -------------- | ----------------------------------------- |
+| `timestamp`    | Data point timestamp (RFC3339)            |
+| `metric_name`  | Metric name                               |
+| `type`         | Metric type (Gauge, Sum, Histogram, etc.) |
+| `value`        | Data point value                          |
+| `count`        | Histogram/summary count                   |
+| `sum`          | Histogram/summary sum                     |
+| `service_name` | Service name from resource                |
+| `resource`     | Resource attributes                       |
+| `attributes`   | Data point attributes                     |
+
+### WHERE clause operators
+
+- Comparison: `=`, `!=`, `<`, `>`, `<=`, `>=`
+- Pattern matching: `LIKE`, `NOT LIKE`
+- Regex: `~` (match), `!~` (not match)
+- Null checks: `IS NULL`, `IS NOT NULL`
+- List membership: `IN (...)`, `NOT IN (...)`
+- Logical: `AND`, `OR`, `NOT`
+- Attribute access: `attributes['key']`, `resource['key']`
 
 ## Tips for Agent Use
 
 - Always use `--no-tui` when starting the server from an agent context
-- Use `--format json` for programmatic processing of query results
+- Use `--format jsonl` for programmatic processing of query results
+- Use `--format csv` for tabular data export
 - Start the server in the background: `otel-cli server --no-tui &`
 - Use `--since` to narrow down results to the relevant time window
 - Combine `--service` and `--attribute` filters to find specific telemetry data
+- Use `otel-cli sql` for complex queries with JOINs, projections, and advanced filtering
 - Use `otel-cli clear` between test runs to reset state

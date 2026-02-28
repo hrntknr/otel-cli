@@ -86,7 +86,7 @@ otel-cli trace --service myapp
 otel-cli trace -f
 
 # Filter by time range
-otel-cli trace --since 5m --format json
+otel-cli trace --since 5m --format jsonl
 ```
 
 ### Query logs
@@ -112,7 +112,29 @@ otel-cli metrics
 otel-cli metrics --name http_requests_total
 
 # Follow metrics in real-time
-otel-cli metrics -f --format json
+otel-cli metrics -f --format jsonl
+```
+
+### SQL queries
+
+```bash
+# Query traces with SQL
+otel-cli sql "SELECT * FROM traces WHERE service_name = 'myapp'"
+
+# Query logs with SQL
+otel-cli sql "SELECT * FROM logs WHERE severity >= 'ERROR'"
+
+# Select specific columns
+otel-cli sql "SELECT span_name, duration_ns FROM traces LIMIT 10"
+
+# Filter by attributes using bracket syntax
+otel-cli sql "SELECT * FROM traces WHERE attributes['http.method'] = 'GET'"
+
+# Follow mode with SQL
+otel-cli sql -f "SELECT * FROM logs"
+
+# CSV output
+otel-cli sql "SELECT * FROM metrics" --format csv
 ```
 
 ### Clear data
@@ -133,7 +155,7 @@ otel-cli clear --traces
 | `--service <NAME>`        | Filter by service name                                  |
 | `--attribute <KEY=VALUE>` | Filter by attribute (repeatable)                        |
 | `--limit <N>`             | Maximum results (default: 100)                          |
-| `--format <FORMAT>`       | Output format: `text`, `json`, `toon`                   |
+| `--format <FORMAT>`       | Output format: `text`, `jsonl`, `csv`                   |
 | `-f, --follow`            | Follow new data in real-time                            |
 | `--since <SPEC>`          | Time range start (`30s`, `5m`, `1h`, `2d`, or RFC3339)  |
 | `--until <SPEC>`          | Time range end (same format)                            |
