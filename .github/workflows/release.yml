@@ -1,8 +1,16 @@
 name: Release
 
 on:
-  push:
-    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: "Version bump type"
+        required: true
+        type: choice
+        options:
+          - patch
+          - minor
+          - major
 
 permissions:
   contents: write
@@ -11,7 +19,43 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  bump:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.bump.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: arduino/setup-protoc@v3
+
+      - name: Bump version
+        id: bump
+        run: |
+          current=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml)
+          IFS='.' read -r major minor patch <<< "$current"
+          case "${{ inputs.bump }}" in
+            major) major=$((major + 1)); minor=0; patch=0 ;;
+            minor) minor=$((minor + 1)); patch=0 ;;
+            patch) patch=$((patch + 1)) ;;
+          esac
+          new_version="${major}.${minor}.${patch}"
+          sed -i "0,/^version = \".*\"/s//version = \"${new_version}\"/" Cargo.toml
+          cargo check
+          echo "version=${new_version}" >> "$GITHUB_OUTPUT"
+
+      - name: Commit and tag
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Cargo.toml Cargo.lock
+          git commit -m "Bump version to ${{ steps.bump.outputs.version }}"
+          git tag "v${{ steps.bump.outputs.version }}"
+          git push origin main --tags
+
   build:
+    needs: bump
     strategy:
       matrix:
         include:
@@ -30,6 +74,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          ref: v${{ needs.bump.outputs.version }}
           submodules: true
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -51,7 +96,7 @@ jobs:
           path: target/${{ matrix.target }}/release/otel-cli${{ matrix.os == 'windows-latest' && '.exe' || '' }}
 
   release:
-    needs: build
+    needs: [bump, build]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
@@ -71,5 +116,6 @@ jobs:
           done
       - uses: softprops/action-gh-release@v2
         with:
+          tag_name: v${{ needs.bump.outputs.version }}
           files: release/otel-cli-*
           generate_release_notes: true
