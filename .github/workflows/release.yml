@@ -29,6 +29,8 @@ jobs:
           submodules: true
       - uses: dtolnay/rust-toolchain@stable
       - uses: arduino/setup-protoc@v3
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Bump version
         id: bump
@@ -80,6 +82,8 @@ jobs:
         with:
           targets: ${{ matrix.target }}
       - uses: arduino/setup-protoc@v3
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
       - name: Install cross-compilation tools
         if: matrix.cross
         run: |
