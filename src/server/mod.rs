@@ -11,6 +11,7 @@ use crate::proto::opentelemetry::proto::collector::{
 };
 use crate::proto::otelcli::query::v1::query_service_server::QueryServiceServer;
 use crate::store::SharedStore;
+use datafusion::prelude::SessionContext;
 use tokio_util::sync::CancellationToken;
 
 pub async fn run_grpc_server(
@@ -34,9 +35,10 @@ pub async fn run_grpc_server(
 pub async fn run_query_server(
     listener: tokio::net::TcpListener,
     store: SharedStore,
+    ctx: SessionContext,
     shutdown: CancellationToken,
 ) -> anyhow::Result<()> {
-    let query_service = query_grpc::QueryGrpcService::new(store);
+    let query_service = query_grpc::QueryGrpcService::new(store, ctx, shutdown.clone());
 
     let incoming = tonic::transport::server::TcpIncoming::from(listener);
     tonic::transport::Server::builder()

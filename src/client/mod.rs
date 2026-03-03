@@ -1,7 +1,9 @@
 pub mod clear;
 pub mod log;
 pub mod metrics;
+pub mod shutdown;
 pub mod sql;
+pub mod status;
 pub mod trace;
 pub mod view;
 
@@ -100,6 +102,24 @@ pub fn get_row_string(row: &ProtoRow, name: &str) -> Option<String> {
     })
 }
 
+/// Get a timestamp column and format it as human-readable RFC3339.
+pub fn get_row_timestamp(row: &ProtoRow, name: &str) -> Option<String> {
+    row.columns.iter().find(|c| c.name == name).and_then(|c| {
+        c.value.as_ref().and_then(|v| match &v.value {
+            Some(any_value::Value::IntValue(nanos)) => Some(format_timestamp(*nanos as u64)),
+            Some(any_value::Value::StringValue(s)) => {
+                // Try parsing as nanos integer string
+                if let Ok(nanos) = s.parse::<u64>() {
+                    Some(format_timestamp(nanos))
+                } else {
+                    Some(s.clone())
+                }
+            }
+            _ => None,
+        })
+    })
+}
+
 pub fn get_row_kvlist<'a>(row: &'a ProtoRow, name: &str) -> Option<&'a [KeyValue]> {
     row.columns.iter().find(|c| c.name == name).and_then(|c| {
         c.value.as_ref().and_then(|v| match &v.value {
@@ -160,6 +180,111 @@ pub fn print_rows_csv(rows: &[ProtoRow], show_header: bool) {
             })
             .collect();
         println!("{}", cells.join(","));
+    }
+}
+
+pub fn print_rows_table(rows: &[ProtoRow]) {
+    if rows.is_empty() {
+        return;
+    }
+
+    let headers: Vec<&str> = rows[0].columns.iter().map(|c| c.name.as_str()).collect();
+
+    // Format all cell values
+    let formatted: Vec<Vec<String>> = rows
+        .iter()
+        .map(|row| {
+            row.columns
+                .iter()
+                .map(|c| match &c.value {
+                    Some(v) => {
+                        if is_timestamp_column(&c.name) {
+                            format_timestamp_value(v)
+                        } else {
+                            format_any_value_for_table(v)
+                        }
+                    }
+                    None => "NULL".to_string(),
+                })
+                .collect()
+        })
+        .collect();
+
+    // Calculate column widths
+    let mut widths: Vec<usize> = headers.iter().map(|h| h.len()).collect();
+    for row in &formatted {
+        for (i, cell) in row.iter().enumerate() {
+            if i < widths.len() {
+                widths[i] = widths[i].max(cell.len());
+            }
+        }
+    }
+
+    // Print header
+    let header_line: Vec<String> = headers
+        .iter()
+        .enumerate()
+        .map(|(i, h)| format!("{:width$}", h, width = widths[i]))
+        .collect();
+    println!("{}", header_line.join(" | "));
+
+    // Print separator
+    let sep_line: Vec<String> = widths.iter().map(|w| "-".repeat(*w)).collect();
+    println!("{}", sep_line.join("-+-"));
+
+    // Print rows
+    for row in &formatted {
+        let cells: Vec<String> = row
+            .iter()
+            .enumerate()
+            .map(|(i, cell)| {
+                let w = widths.get(i).copied().unwrap_or(0);
+                format!("{:width$}", cell, width = w)
+            })
+            .collect();
+        println!("{}", cells.join(" | "));
+    }
+}
+
+fn is_timestamp_column(name: &str) -> bool {
+    matches!(
+        name,
+        "timestamp" | "start_time" | "end_time" | "time_unix_nano"
+    )
+}
+
+fn format_timestamp_value(value: &AnyValue) -> String {
+    match &value.value {
+        Some(any_value::Value::IntValue(nanos)) => format_timestamp(*nanos as u64),
+        Some(any_value::Value::StringValue(s)) => {
+            if let Ok(nanos) = s.parse::<u64>() {
+                format_timestamp(nanos)
+            } else {
+                s.clone()
+            }
+        }
+        _ => extract_any_value_string(value),
+    }
+}
+
+fn format_any_value_for_table(value: &AnyValue) -> String {
+    match &value.value {
+        Some(any_value::Value::KvlistValue(kvl)) => {
+            let pairs: Vec<String> = kvl
+                .values
+                .iter()
+                .map(|kv| {
+                    let val = kv
+                        .value
+                        .as_ref()
+                        .map(extract_any_value_string)
+                        .unwrap_or_default();
+                    format!("{}={}", kv.key, val)
+                })
+                .collect();
+            format!("{{{}}}", pairs.join(", "))
+        }
+        _ => extract_any_value_string(value),
     }
 }
 

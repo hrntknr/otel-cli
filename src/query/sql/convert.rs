@@ -1,5 +1,7 @@
 /// Convert old CLI flags to SQL query strings.
 
+use crate::query::severity_text_to_number;
+
 pub fn trace_flags_to_sql(
     service: Option<&str>,
     trace_id: Option<&str>,
@@ -47,7 +49,8 @@ pub fn log_flags_to_sql(
         conditions.push(format!("service_name = '{}'", escape_sql_string(svc)));
     }
     if let Some(sev) = severity {
-        conditions.push(format!("severity >= '{}'", escape_sql_string(sev)));
+        let num = severity_text_to_number(sev);
+        conditions.push(format!("severity_number >= {}", num));
     }
     for (key, value) in attributes {
         conditions.push(format!(
@@ -169,7 +172,7 @@ mod tests {
     #[test]
     fn log_severity_only() {
         let sql = log_flags_to_sql(None, Some("ERROR"), &[], None, None, None);
-        assert_eq!(sql, "SELECT * FROM logs WHERE severity >= 'ERROR'");
+        assert_eq!(sql, "SELECT * FROM logs WHERE severity_number >= 17");
     }
 
     #[test]
@@ -177,7 +180,7 @@ mod tests {
         let sql = log_flags_to_sql(Some("myapp"), Some("WARN"), &[], None, None, None);
         assert_eq!(
             sql,
-            "SELECT * FROM logs WHERE service_name = 'myapp' AND severity >= 'WARN'"
+            "SELECT * FROM logs WHERE service_name = 'myapp' AND severity_number >= 13"
         );
     }
 

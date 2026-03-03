@@ -16,6 +16,8 @@ service QueryService {
   rpc ClearTraces(ClearTracesRequest) returns (ClearResponse);
   rpc ClearLogs(ClearLogsRequest) returns (ClearResponse);
   rpc ClearMetrics(ClearMetricsRequest) returns (ClearResponse);
+  rpc Status(StatusRequest) returns (StatusResponse);
+  rpc Shutdown(ShutdownRequest) returns (ShutdownResponse);
 }
 
 message SqlQueryRequest {
@@ -53,3 +55,12 @@ message ClearTracesRequest {}
 message ClearLogsRequest {}
 message ClearMetricsRequest {}
 message ClearResponse {}
+
+message StatusRequest {}
+message StatusResponse {
+  uint64 trace_count = 1;
+  uint64 log_count = 2;
+  uint64 metric_count = 3;
+}
+message ShutdownRequest {}
+message ShutdownResponse {}

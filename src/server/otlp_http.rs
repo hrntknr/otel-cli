@@ -9,6 +9,7 @@ use axum::{
 use base64::Engine;
 use prost::Message;
 use serde::de::DeserializeOwned;
+use tracing::instrument;
 
 use crate::proto::opentelemetry::proto::collector::{
     logs::v1::{ExportLogsServiceRequest, ExportLogsServiceResponse},
@@ -25,6 +26,7 @@ pub fn router(store: SharedStore) -> Router {
         .with_state(store)
 }
 
+#[instrument(name = "otlp.http.export_traces", skip_all, fields(http.route = "/v1/traces"))]
 async fn handle_traces(
     State(store): State<SharedStore>,
     headers: HeaderMap,
@@ -34,8 +36,16 @@ async fn handle_traces(
     let request: ExportTraceServiceRequest = if is_json {
         decode_json(&body)?
     } else {
-        ExportTraceServiceRequest::decode(body).map_err(|_| StatusCode::BAD_REQUEST)?
+        ExportTraceServiceRequest::decode(body).map_err(|e| {
+            tracing::warn!(error = %e, "failed to decode protobuf trace request");
+            StatusCode::BAD_REQUEST
+        })?
     };
+    tracing::debug!(
+        count = request.resource_spans.len(),
+        is_json,
+        "received trace export via HTTP"
+    );
     let mut s = store.write().await;
     s.insert_traces(request.resource_spans);
     let response = ExportTraceServiceResponse {
@@ -44,6 +54,7 @@ async fn handle_traces(
     Ok(encode_response(&response, is_json)?)
 }
 
+#[instrument(name = "otlp.http.export_logs", skip_all, fields(http.route = "/v1/logs"))]
 async fn handle_logs(
     State(store): State<SharedStore>,
     headers: HeaderMap,
@@ -53,8 +64,16 @@ async fn handle_logs(
     let request: ExportLogsServiceRequest = if is_json {
         decode_json(&body)?
     } else {
-        ExportLogsServiceRequest::decode(body).map_err(|_| StatusCode::BAD_REQUEST)?
+        ExportLogsServiceRequest::decode(body).map_err(|e| {
+            tracing::warn!(error = %e, "failed to decode protobuf log request");
+            StatusCode::BAD_REQUEST
+        })?
     };
+    tracing::debug!(
+        count = request.resource_logs.len(),
+        is_json,
+        "received log export via HTTP"
+    );
     let mut s = store.write().await;
     s.insert_logs(request.resource_logs);
     let response = ExportLogsServiceResponse {
@@ -63,6 +82,7 @@ async fn handle_logs(
     Ok(encode_response(&response, is_json)?)
 }
 
+#[instrument(name = "otlp.http.export_metrics", skip_all, fields(http.route = "/v1/metrics"))]
 async fn handle_metrics(
     State(store): State<SharedStore>,
     headers: HeaderMap,
@@ -72,8 +92,16 @@ async fn handle_metrics(
     let request: ExportMetricsServiceRequest = if is_json {
         decode_json(&body)?
     } else {
-        ExportMetricsServiceRequest::decode(body).map_err(|_| StatusCode::BAD_REQUEST)?
+        ExportMetricsServiceRequest::decode(body).map_err(|e| {
+            tracing::warn!(error = %e, "failed to decode protobuf metric request");
+            StatusCode::BAD_REQUEST
+        })?
     };
+    tracing::debug!(
+        count = request.resource_metrics.len(),
+        is_json,
+        "received metric export via HTTP"
+    );
     let mut s = store.write().await;
     s.insert_metrics(request.resource_metrics);
     let response = ExportMetricsServiceResponse {
@@ -92,10 +120,15 @@ fn is_json_content_type(headers: &HeaderMap) -> bool {
 
 /// Decode a JSON body, converting OTLP hex-encoded trace_id/span_id fields to base64.
 fn decode_json<T: DeserializeOwned>(body: &[u8]) -> Result<T, StatusCode> {
-    let mut value: serde_json::Value =
-        serde_json::from_slice(body).map_err(|_| StatusCode::BAD_REQUEST)?;
+    let mut value: serde_json::Value = serde_json::from_slice(body).map_err(|e| {
+        tracing::warn!(error = %e, "failed to parse JSON body");
+        StatusCode::BAD_REQUEST
+    })?;
     convert_hex_ids_to_base64(&mut value);
-    serde_json::from_value(value).map_err(|_| StatusCode::BAD_REQUEST)
+    serde_json::from_value(value).map_err(|e| {
+        tracing::warn!(error = %e, "failed to deserialize JSON into OTLP message");
+        StatusCode::BAD_REQUEST
+    })
 }
 
 fn encode_response<T: serde::Serialize + Message>(

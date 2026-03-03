@@ -222,9 +222,9 @@ async fn test_http_json_trace_ingest() {
     assert_eq!(content_type, "application/json");
 
     let s = store.read().await;
-    let traces = s.query_traces_since_version(0);
+    let traces = s.query_traces_since(0);
     assert_eq!(traces.len(), 1);
-    let span = &traces[0].resource_spans[0].scope_spans[0].spans[0];
+    let span = &traces[0].scope_spans[0].spans[0];
     assert_eq!(span.name, "json-span");
     assert_eq!(
         span.trace_id,

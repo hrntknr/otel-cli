@@ -4,7 +4,8 @@ use crate::proto::otelcli::query::v1::{Row as ProtoRow, SqlQueryRequest};
 use crate::query::sql::convert::log_flags_to_sql;
 
 use super::{
-    get_row_kvlist, get_row_string, parse_time_spec, print_kvlist, print_rows_csv, print_rows_jsonl,
+    get_row_kvlist, get_row_string, get_row_timestamp, parse_time_spec, print_kvlist,
+    print_rows_csv, print_rows_jsonl,
 };
 
 #[allow(clippy::too_many_arguments)]
@@ -38,6 +39,7 @@ pub async fn query_logs(
     match format {
         OutputFormat::Jsonl => print_rows_jsonl(&response.rows)?,
         OutputFormat::Csv => print_rows_csv(&response.rows, true),
+        OutputFormat::Table => super::print_rows_table(&response.rows),
         OutputFormat::Text => print_log_rows_text(&response.rows),
     }
 
@@ -80,6 +82,7 @@ pub async fn follow_logs(
                 print_rows_csv(&msg.rows, !csv_header_shown);
                 csv_header_shown = true;
             }
+            OutputFormat::Table => super::print_rows_table(&msg.rows),
             OutputFormat::Text => print_log_rows_text(&msg.rows),
         }
     }
@@ -90,7 +93,7 @@ pub async fn follow_logs(
 pub fn print_log_rows_text(rows: &[ProtoRow]) {
     for row in rows {
         // Header line: {timestamp} [{severity}] {body}
-        let timestamp = get_row_string(row, "timestamp").unwrap_or_default();
+        let timestamp = get_row_timestamp(row, "timestamp").unwrap_or_default();
         let severity = get_row_string(row, "severity").unwrap_or_default();
         let body = get_row_string(row, "body").unwrap_or_default();
 

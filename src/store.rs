@@ -1,11 +1,12 @@
 use std::collections::VecDeque;
 use std::sync::Arc;
 use tokio::sync::{broadcast, RwLock};
+use tracing::instrument;
 
 use crate::proto::opentelemetry::proto::{
     logs::v1::ResourceLogs,
     metrics::v1::{metric, ResourceMetrics},
-    trace::v1::{ResourceSpans, ScopeSpans},
+    trace::v1::ResourceSpans,
 };
 
 #[derive(Debug, Clone)]
@@ -18,27 +19,17 @@ pub enum StoreEvent {
     MetricsCleared,
 }
 
-#[derive(Clone)]
-pub struct TraceGroup {
-    pub trace_id: Vec<u8>,
-    pub resource_spans: Vec<ResourceSpans>,
-    rs_versions: Vec<u64>,
-    sort_key: u64,
-    version: u64,
-}
-
 pub struct Store {
-    traces: VecDeque<TraceGroup>,
+    traces: VecDeque<ResourceSpans>,
     logs: VecDeque<ResourceLogs>,
     metrics: VecDeque<ResourceMetrics>,
     max_items: usize,
     event_tx: broadcast::Sender<StoreEvent>,
-    trace_version: u64,
 }
 
 pub type SharedStore = Arc<RwLock<Store>>;
 
-fn rs_sort_key(rs: &ResourceSpans) -> u64 {
+pub fn rs_sort_key(rs: &ResourceSpans) -> u64 {
     rs.scope_spans
         .iter()
         .flat_map(|ss| ss.spans.iter().map(|s| s.start_time_unix_nano))
@@ -46,71 +37,20 @@ fn rs_sort_key(rs: &ResourceSpans) -> u64 {
         .unwrap_or(0)
 }
 
-/// Split a ResourceSpans into per-trace_id chunks.
-fn split_by_trace_id(rs: ResourceSpans) -> Vec<(Vec<u8>, ResourceSpans)> {
-    let mut trace_ids: Vec<Vec<u8>> = rs
-        .scope_spans
-        .iter()
-        .flat_map(|ss| ss.spans.iter().map(|s| s.trace_id.clone()))
-        .collect();
-    trace_ids.sort();
-    trace_ids.dedup();
-
-    // Fast path: single trace_id (most common case)
-    if trace_ids.len() <= 1 {
-        let trace_id = trace_ids.into_iter().next().unwrap_or_default();
-        return vec![(trace_id, rs)];
+/// Returns the effective timestamp for a log record,
+/// falling back to observed_time_unix_nano when time_unix_nano is not set.
+pub fn log_timestamp(lr: &crate::proto::opentelemetry::proto::logs::v1::LogRecord) -> u64 {
+    if lr.time_unix_nano > 0 {
+        lr.time_unix_nano
+    } else {
+        lr.observed_time_unix_nano
     }
-
-    // Split ResourceSpans by trace_id
-    trace_ids
-        .into_iter()
-        .map(|tid| {
-            let scope_spans = rs
-                .scope_spans
-                .iter()
-                .filter_map(|ss| {
-                    let spans: Vec<_> = ss
-                        .spans
-                        .iter()
-                        .filter(|s| s.trace_id == tid)
-                        .cloned()
-                        .collect();
-                    if spans.is_empty() {
-                        None
-                    } else {
-                        Some(ScopeSpans {
-                            scope: ss.scope.clone(),
-                            spans,
-                            schema_url: ss.schema_url.clone(),
-                        })
-                    }
-                })
-                .collect();
-            (
-                tid,
-                ResourceSpans {
-                    resource: rs.resource.clone(),
-                    scope_spans,
-                    schema_url: rs.schema_url.clone(),
-                },
-            )
-        })
-        .collect()
 }
 
 pub fn log_sort_key(rl: &ResourceLogs) -> u64 {
     rl.scope_logs
         .iter()
-        .flat_map(|sl| {
-            sl.log_records.iter().map(|lr| {
-                if lr.time_unix_nano > 0 {
-                    lr.time_unix_nano
-                } else {
-                    lr.observed_time_unix_nano
-                }
-            })
-        })
+        .flat_map(|sl| sl.log_records.iter().map(|lr| log_timestamp(lr)))
         .min()
         .unwrap_or(0)
 }
@@ -193,7 +133,6 @@ impl Store {
             metrics: VecDeque::new(),
             max_items,
             event_tx,
-            trace_version: 0,
         };
         (store, event_rx)
     }
@@ -202,7 +141,7 @@ impl Store {
         self.event_tx.subscribe()
     }
 
-    pub fn all_traces(&self) -> &VecDeque<TraceGroup> {
+    pub fn all_traces(&self) -> &VecDeque<ResourceSpans> {
         &self.traces
     }
 
@@ -214,45 +153,21 @@ impl Store {
         &self.metrics
     }
 
+    #[instrument(name = "store.insert_traces", skip_all, fields(count = resource_spans.len()))]
     pub fn insert_traces(&mut self, resource_spans: Vec<ResourceSpans>) {
         for rs in resource_spans {
-            for (trace_id, split_rs) in split_by_trace_id(rs) {
-                let ts = rs_sort_key(&split_rs);
-                self.trace_version += 1;
-                let ver = self.trace_version;
-                if let Some(idx) = self.traces.iter().position(|g| g.trace_id == trace_id) {
-                    let pos = self.traces[idx]
-                        .resource_spans
-                        .partition_point(|rs| rs_sort_key(rs) <= ts);
-                    self.traces[idx].resource_spans.insert(pos, split_rs);
-                    self.traces[idx].rs_versions.insert(pos, ver);
-                    self.traces[idx].version = ver;
-                    if ts < self.traces[idx].sort_key {
-                        self.traces[idx].sort_key = ts;
-                        let group = self.traces.remove(idx).unwrap();
-                        let new_pos =
-                            sorted_insert_pos(&self.traces, group.sort_key, |g| g.sort_key);
-                        self.traces.insert(new_pos, group);
-                    }
-                } else {
-                    let group = TraceGroup {
-                        trace_id,
-                        resource_spans: vec![split_rs],
-                        rs_versions: vec![ver],
-                        sort_key: ts,
-                        version: ver,
-                    };
-                    let pos = sorted_insert_pos(&self.traces, group.sort_key, |g| g.sort_key);
-                    self.traces.insert(pos, group);
-                }
+            let ts = rs_sort_key(&rs);
+            let pos = sorted_insert_pos(&self.traces, ts, rs_sort_key);
+            self.traces.insert(pos, rs);
+            if self.traces.len() > self.max_items {
+                self.traces.pop_front();
+                tracing::debug!(max_items = self.max_items, "trace evicted");
             }
-        }
-        while self.traces.len() > self.max_items {
-            self.traces.pop_front();
         }
         let _ = self.event_tx.send(StoreEvent::TracesAdded);
     }
 
+    #[instrument(name = "store.insert_logs", skip_all, fields(count = resource_logs.len()))]
     pub fn insert_logs(&mut self, resource_logs: Vec<ResourceLogs>) {
         for rl in resource_logs {
             let ts = log_sort_key(&rl);
@@ -260,11 +175,13 @@ impl Store {
             self.logs.insert(pos, rl);
             if self.logs.len() > self.max_items {
                 self.logs.pop_front();
+                tracing::debug!(max_items = self.max_items, "log evicted");
             }
         }
         let _ = self.event_tx.send(StoreEvent::LogsAdded);
     }
 
+    #[instrument(name = "store.insert_metrics", skip_all, fields(count = resource_metrics.len()))]
     pub fn insert_metrics(&mut self, resource_metrics: Vec<ResourceMetrics>) {
         for rm in resource_metrics {
             let ts = metric_sort_key(&rm);
@@ -272,21 +189,25 @@ impl Store {
             self.metrics.insert(pos, rm);
             if self.metrics.len() > self.max_items {
                 self.metrics.pop_front();
+                tracing::debug!(max_items = self.max_items, "metric evicted");
             }
         }
         let _ = self.event_tx.send(StoreEvent::MetricsAdded);
     }
 
+    #[instrument(name = "store.clear_traces", skip_all)]
     pub fn clear_traces(&mut self) {
         self.traces.clear();
         let _ = self.event_tx.send(StoreEvent::TracesCleared);
     }
 
+    #[instrument(name = "store.clear_logs", skip_all)]
     pub fn clear_logs(&mut self) {
         self.logs.clear();
         let _ = self.event_tx.send(StoreEvent::LogsCleared);
     }
 
+    #[instrument(name = "store.clear_metrics", skip_all)]
     pub fn clear_metrics(&mut self) {
         self.metrics.clear();
         let _ = self.event_tx.send(StoreEvent::MetricsCleared);
@@ -304,16 +225,12 @@ impl Store {
         self.metrics.len()
     }
 
-    pub fn query_traces_since_version(&self, min_version: u64) -> Vec<TraceGroup> {
+    pub fn query_traces_since(&self, min_ts: u64) -> Vec<ResourceSpans> {
         self.traces
             .iter()
-            .filter(|group| group.version > min_version)
+            .filter(|rs| rs_sort_key(rs) >= min_ts)
             .cloned()
             .collect()
-    }
-
-    pub fn current_trace_version(&self) -> u64 {
-        self.trace_version
     }
 
     pub fn query_logs_since(&self, min_ts: u64) -> Vec<ResourceLogs> {
@@ -488,7 +405,6 @@ mod tests {
         let (mut store, _rx) = Store::new(100);
         store.insert_traces(vec![make_resource_spans("svc-a", &[1; 16], &[])]);
         assert_eq!(store.all_traces().len(), 1);
-        assert_eq!(store.all_traces()[0].resource_spans.len(), 1);
     }
 
     #[test]
@@ -519,18 +435,19 @@ mod tests {
         let names: Vec<_> = store
             .all_traces()
             .iter()
-            .map(|g| get_svc_name(&g.resource_spans[0]))
+            .map(|rs| get_svc_name(rs))
             .collect();
         assert_eq!(names, vec!["svc-2", "svc-3", "svc-4"]);
     }
 
     #[test]
-    fn eviction_traces_by_trace_id() {
+    fn eviction_traces_flat() {
         let (mut store, _rx) = Store::new(2);
         store.insert_traces(vec![
             make_resource_spans_full("svc-a", &[1; 16], &[], 100, 200),
             make_resource_spans_full("svc-b", &[1; 16], &[], 200, 300),
         ]);
+        // After inserting 2 items at max_items=2, inserting more evicts oldest
         store.insert_traces(vec![make_resource_spans_full(
             "svc-c",
             &[2; 16],
@@ -538,21 +455,14 @@ mod tests {
             300,
             400,
         )]);
-        store.insert_traces(vec![make_resource_spans_full(
-            "svc-d",
-            &[3; 16],
-            &[],
-            400,
-            500,
-        )]);
 
         assert_eq!(store.all_traces().len(), 2);
         let names: Vec<_> = store
             .all_traces()
             .iter()
-            .map(|g| get_svc_name(&g.resource_spans[0]))
+            .map(|rs| get_svc_name(rs))
             .collect();
-        assert_eq!(names, vec!["svc-c", "svc-d"]);
+        assert_eq!(names, vec!["svc-b", "svc-c"]);
     }
 
     #[test]
@@ -612,9 +522,9 @@ mod tests {
             300,
         )]);
 
-        assert_eq!(store.all_traces().len(), 1);
-        let names: Vec<_> = store.all_traces()[0]
-            .resource_spans
+        assert_eq!(store.all_traces().len(), 3);
+        let names: Vec<_> = store
+            .all_traces()
             .iter()
             .map(get_svc_name)
             .collect();
@@ -632,45 +542,15 @@ mod tests {
     }
 
     #[test]
-    fn trace_version_tracking() {
+    fn query_traces_since() {
         let (mut store, _rx) = Store::new(100);
-        assert_eq!(store.current_trace_version(), 0);
-
-        store.insert_traces(vec![make_resource_spans_full(
-            "svc-a",
-            &[1; 16],
-            &[],
-            100,
-            200,
-        )]);
-        assert_eq!(store.current_trace_version(), 1);
-
-        store.insert_traces(vec![make_resource_spans_full(
-            "svc-b",
-            &[1; 16],
-            &[],
-            200,
-            300,
-        )]);
-        assert_eq!(store.current_trace_version(), 2);
-
-        store.insert_traces(vec![make_resource_spans_full(
-            "svc-c",
-            &[2; 16],
-            &[],
-            300,
-            400,
-        )]);
-        assert_eq!(store.current_trace_version(), 3);
-
-        let result = store.query_traces_since_version(1);
-        assert_eq!(result.len(), 2);
-
-        let result = store.query_traces_since_version(2);
-        assert_eq!(result.len(), 1);
-
-        let result = store.query_traces_since_version(3);
-        assert_eq!(result.len(), 0);
+        store.insert_traces(vec![
+            make_resource_spans_full("svc-a", &[1; 16], &[], 100, 200),
+            make_resource_spans_full("svc-b", &[1; 16], &[], 200, 300),
+            make_resource_spans_full("svc-c", &[2; 16], &[], 300, 400),
+        ]);
+        assert_eq!(store.query_traces_since(200).len(), 2);
+        assert_eq!(store.query_traces_since(301).len(), 0);
     }
 
     #[test]

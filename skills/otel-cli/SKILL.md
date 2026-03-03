@@ -134,25 +134,49 @@ Run SQL queries against collected telemetry data. Supports `traces`, `logs`, and
 
 ```bash
 # Query traces with SQL
-otel-cli sql "SELECT * FROM traces WHERE service_name = 'myapp'"
+otel-cli sql " traces WHERE service_name = 'myapp'"
 
 # Query logs by severity
-otel-cli sql "SELECT * FROM logs WHERE severity >= 'ERROR'"
+otel-cli sql " logs WHERE severity >= 'ERROR'"
 
 # Select specific columns
 otel-cli sql "SELECT span_name, duration_ns FROM traces LIMIT 10"
 
 # Filter by attributes using bracket syntax
-otel-cli sql "SELECT * FROM traces WHERE attributes['http.method'] = 'GET'"
+otel-cli sql " traces WHERE attributes['http.method'] = 'GET'"
 
 # LIKE / regex matching
-otel-cli sql "SELECT * FROM logs WHERE body LIKE '%timeout%'"
+otel-cli sql " logs WHERE body LIKE '%timeout%'"
 
 # Follow mode
-otel-cli sql -f "SELECT * FROM logs"
+otel-cli sql -f " logs"
 
 # CSV output
-otel-cli sql "SELECT * FROM metrics" --format csv
+otel-cli sql " metrics" --format csv
+```
+
+### Server Status
+
+Check the status of a running server.
+
+```bash
+# Show trace/log/metric counts
+otel-cli status
+
+# Check a remote server
+otel-cli status --server http://remote-host:4319
+```
+
+### Server Shutdown
+
+Remotely shut down a running server.
+
+```bash
+# Shutdown default server
+otel-cli shutdown
+
+# Shutdown a remote server
+otel-cli shutdown --server http://remote-host:4319
 ```
 
 ### Clear Data
@@ -251,5 +275,8 @@ otel-cli clear --logs
 - Start the server in the background: `otel-cli server --no-tui &`
 - Use `--since` to narrow down results to the relevant time window
 - Combine `--service` and `--attribute` filters to find specific telemetry data
-- Use `otel-cli sql` for complex queries with JOINs, projections, and advanced filtering
+- Use `otel-cli sql` for complex queries with projections and advanced filtering
+- `otel-cli sql` does not have a `--limit` CLI flag; use `LIMIT N` inside the SQL query instead (e.g., `otel-cli sql " traces LIMIT 50"`)
 - Use `otel-cli clear` between test runs to reset state
+- Use `otel-cli status` to check if the server is running and see stored data counts
+- Use `otel-cli shutdown` to gracefully stop a headless server started with `&`

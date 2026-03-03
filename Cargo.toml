@@ -13,7 +13,7 @@ name = "otel-cli"
 path = "src/main.rs"
 
 [dependencies]
-clap = { version = "4", features = ["derive"] }
+clap = { version = "4", features = ["derive", "env"] }
 tokio = { version = "1", features = ["full"] }
 tonic = "0.14"
 tonic-prost = "0.14"
@@ -33,8 +33,15 @@ chrono = { version = "0.4", features = ["serde"] }
 tokio-util = "0.7"
 tokio-stream = { version = "0.1", features = ["sync"] }
 async-stream = "0.3"
-sqlparser = "0.53"
+datafusion = "52"
 regex = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["registry"] }
+tracing-opentelemetry = { version = "0.32", features = ["metrics"] }
+opentelemetry = { version = "0.31", features = ["logs"] }
+opentelemetry_sdk = { version = "0.31", features = ["rt-tokio", "logs", "metrics"] }
+opentelemetry-otlp = { version = "0.31", features = ["grpc-tonic", "logs", "metrics"] }
+opentelemetry-appender-tracing = "0.31"
 
 [build-dependencies]
 tonic-prost-build = "0.14"

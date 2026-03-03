@@ -52,9 +52,10 @@ async fn start_servers(grpc_port: u16, query_port: u16) -> (store::SharedStore, 
     let query_addr: std::net::SocketAddr = format!("127.0.0.1:{}", query_port).parse().unwrap();
     let query_listener = tokio::net::TcpListener::bind(query_addr).await.unwrap();
     let store_clone = shared_store.clone();
+    let ctx = otel_cli::query::datafusion_ctx::create_context(shared_store.clone());
     let shutdown_clone = shutdown.clone();
     tokio::spawn(async move {
-        otel_cli::server::run_query_server(query_listener, store_clone, shutdown_clone)
+        otel_cli::server::run_query_server(query_listener, store_clone, ctx, shutdown_clone)
             .await
             .unwrap();
     });
@@ -224,11 +225,11 @@ async fn test_sql_query_logs_severity_ge() {
             .unwrap();
     }
 
-    // Query with severity >= WARN using SQL
+    // Query with severity_number >= 13 (WARN) using SQL
     let mut query_client = QueryServiceClient::connect(query_addr).await.unwrap();
     let response = query_client
         .sql_query(SqlQueryRequest {
-            query: "SELECT * FROM logs WHERE severity >= 'WARN'".into(),
+            query: "SELECT * FROM logs WHERE severity_number >= 13".into(),
         })
         .await
         .unwrap();

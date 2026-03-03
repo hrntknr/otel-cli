@@ -5,4 +5,5 @@ pub mod proto;
 pub mod query;
 pub mod server;
 pub mod store;
+pub mod telemetry;
 pub mod tui;

@@ -4,7 +4,8 @@ use crate::proto::otelcli::query::v1::{Row as ProtoRow, SqlQueryRequest};
 use crate::query::sql::convert::metric_flags_to_sql;
 
 use super::{
-    get_row_kvlist, get_row_string, parse_time_spec, print_kvlist, print_rows_csv, print_rows_jsonl,
+    get_row_kvlist, get_row_string, get_row_timestamp, parse_time_spec, print_kvlist,
+    print_rows_csv, print_rows_jsonl,
 };
 
 pub async fn query_metrics(
@@ -35,6 +36,7 @@ pub async fn query_metrics(
     match format {
         OutputFormat::Jsonl => print_rows_jsonl(&response.rows)?,
         OutputFormat::Csv => print_rows_csv(&response.rows, true),
+        OutputFormat::Table => super::print_rows_table(&response.rows),
         OutputFormat::Text => print_metric_rows_text(&response.rows),
     }
 
@@ -74,6 +76,7 @@ pub async fn follow_metrics(
                 print_rows_csv(&msg.rows, !csv_header_shown);
                 csv_header_shown = true;
             }
+            OutputFormat::Table => super::print_rows_table(&msg.rows),
             OutputFormat::Text => print_metric_rows_text(&msg.rows),
         }
     }
@@ -102,7 +105,7 @@ pub fn print_metric_rows_text(rows: &[ProtoRow]) {
         let value = get_row_string(row, "value");
         let count = get_row_string(row, "count");
         let sum = get_row_string(row, "sum");
-        let timestamp = get_row_string(row, "timestamp");
+        let timestamp = get_row_timestamp(row, "timestamp");
 
         let has_value = value.is_some();
         let has_count = count.is_some();

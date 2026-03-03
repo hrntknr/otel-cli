@@ -40,5 +40,6 @@ pub async fn run_view(server: &str, max_items: usize) -> anyhow::Result<()> {
         }
     });
 
-    crate::tui::run(store, event_rx).await
+    let ctx = crate::query::datafusion_ctx::create_context(store.clone());
+    crate::tui::run(store, ctx, event_rx).await
 }

@@ -15,13 +15,15 @@ use tokio::sync::broadcast;
 
 use std::collections::HashMap;
 
+use datafusion::prelude::SessionContext;
+
 use crate::client;
 use crate::proto::opentelemetry::proto::{
     logs::v1::ResourceLogs,
     metrics::v1::{metric, number_data_point, ResourceMetrics},
     trace::v1::ResourceSpans,
 };
-use crate::store::{self, SharedStore, StoreEvent};
+use crate::store::{SharedStore, StoreEvent};
 
 // --- Local filter types (used only by TUI, converted to SQL internally) ---
 
@@ -254,6 +256,7 @@ pub struct MetricGroup {
 
 pub struct App {
     store: SharedStore,
+    ctx: SessionContext,
     event_handler: event::EventHandler,
     pub current_tab: tabs::Tab,
     pub table_state: TableState,
@@ -274,7 +277,7 @@ pub struct App {
     pub trace_summaries: Vec<TraceSummary>,
     pub timeline_spans: Vec<TimelineSpan>,
     pub timeline_table_state: TableState,
-    raw_traces: Vec<store::TraceGroup>,
+    raw_traces: Vec<ResourceSpans>,
     pub detail_panel_percent: u16,
     pub content_area: ratatui::layout::Rect,
     dragging_split: bool,
@@ -292,9 +295,10 @@ pub struct App {
 }
 
 impl App {
-    fn new(store: SharedStore, event_rx: broadcast::Receiver<StoreEvent>) -> Self {
+    fn new(store: SharedStore, ctx: SessionContext, event_rx: broadcast::Receiver<StoreEvent>) -> Self {
         Self {
-            store,
+            store: store.clone(),
+            ctx,
             event_handler: event::EventHandler::new(event_rx),
             current_tab: tabs::Tab::Logs,
             table_state: TableState::default(),
@@ -323,7 +327,7 @@ impl App {
             log_filter: LogFilter {
                 severity: Some(SeverityCondition {
                     operator: FilterOperator::Ge,
-                    value: "INFO".to_string(),
+                    value: "DEBUG".to_string(),
                 }),
                 ..LogFilter::default()
             },
@@ -489,12 +493,19 @@ impl App {
                         if let Some(idx) = self.table_state.selected() {
                             if let Some(summary) = self.trace_summaries.get(idx) {
                                 let trace_id = summary.trace_id.clone();
-                                self.timeline_spans = self
+                                let matching: Vec<_> = self
                                     .raw_traces
                                     .iter()
-                                    .find(|g| client::hex_encode(&g.trace_id) == trace_id)
-                                    .map(|g| build_timeline_spans(&g.resource_spans))
-                                    .unwrap_or_default();
+                                    .filter(|rs| {
+                                        rs.scope_spans.iter().any(|ss| {
+                                            ss.spans
+                                                .iter()
+                                                .any(|s| client::hex_encode(&s.trace_id) == trace_id)
+                                        })
+                                    })
+                                    .cloned()
+                                    .collect();
+                                self.timeline_spans = build_timeline_spans(&matching);
                                 self.timeline_table_state = TableState::default();
                                 if !self.timeline_spans.is_empty() {
                                     self.timeline_table_state.select(Some(0));
@@ -1050,19 +1061,10 @@ impl App {
             None
         };
 
-        let (all_logs, filtered_logs) = if refresh_logs {
-            let all: Vec<_> = store.all_logs().iter().cloned().collect();
-            let log_query = log_filter_to_sql(&self.log_filter);
-            let filtered = match crate::query::sql::parse(&log_query) {
-                Ok(parsed) => match crate::query::sql::eval(&store, &parsed) {
-                    crate::query::QueryResult::Logs(l) => l,
-                    _ => all.clone(),
-                },
-                Err(_) => all.clone(),
-            };
-            (Some(all), Some(filtered))
+        let all_logs = if refresh_logs {
+            Some(store.all_logs().iter().cloned().collect::<Vec<_>>())
         } else {
-            (None, None)
+            None
         };
 
         let metrics = if refresh_metrics {
@@ -1071,6 +1073,15 @@ impl App {
             None
         };
         drop(store);
+
+        // Run DataFusion log filter query (requires await, so done after dropping store lock)
+        let filtered_log_rows = if refresh_logs {
+            let log_query = log_filter_to_sql(&self.log_filter);
+            let _span = tracing::info_span!("tui.filter_logs").entered();
+            crate::query::sql::execute(&self.ctx, &log_query).await.ok()
+        } else {
+            None
+        };
 
         // Process traces
         if let Some(traces) = traces {
@@ -1088,12 +1099,19 @@ impl App {
                 });
             }
             if let TraceView::Timeline(ref trace_id) = self.trace_view {
-                self.timeline_spans = self
+                let matching: Vec<_> = self
                     .raw_traces
                     .iter()
-                    .find(|g| client::hex_encode(&g.trace_id) == *trace_id)
-                    .map(|g| build_timeline_spans(&g.resource_spans))
-                    .unwrap_or_default();
+                    .filter(|rs| {
+                        rs.scope_spans.iter().any(|ss| {
+                            ss.spans
+                                .iter()
+                                .any(|s| client::hex_encode(&s.trace_id) == *trace_id)
+                        })
+                    })
+                    .cloned()
+                    .collect();
+                self.timeline_spans = build_timeline_spans(&matching);
             }
 
             if self.current_tab == tabs::Tab::Traces && self.follow {
@@ -1107,13 +1125,14 @@ impl App {
         }
 
         // Process logs
-        if let (Some(all_logs), Some(filtered_logs)) = (all_logs, filtered_logs) {
+        if let Some(all_logs) = all_logs {
             self.update_available_fields(&all_logs);
 
-            let mut logs_data: Vec<LogRow> = filtered_logs
-                .into_iter()
-                .flat_map(|rl| convert_log_rows(&rl))
-                .collect();
+            let mut logs_data: Vec<LogRow> = if let Some(rows) = filtered_log_rows {
+                rows.into_iter().map(|row| sql_row_to_log_row(&row)).collect()
+            } else {
+                all_logs.iter().flat_map(|rl| convert_log_rows(rl)).collect()
+            };
 
             if !self.log_search.is_empty() {
                 let needle = self.log_search.to_ascii_lowercase();
@@ -1183,7 +1202,17 @@ fn log_filter_to_sql(filter: &LogFilter) -> String {
     let mut conditions = Vec::new();
 
     if let Some(ref sev) = filter.severity {
-        conditions.push(format!("severity >= '{}'", sev.value));
+        let num = crate::query::severity_text_to_number(&sev.value);
+        let op = match sev.operator {
+            FilterOperator::Ge => ">=",
+            FilterOperator::Gt => ">",
+            FilterOperator::Le => "<=",
+            FilterOperator::Lt => "<",
+            FilterOperator::Eq => "=",
+            FilterOperator::NotEq => "!=",
+            _ => ">=",
+        };
+        conditions.push(format!("severity_number {} {}", op, num));
     }
 
     for cond in &filter.attribute_conditions {
@@ -1245,6 +1274,7 @@ pub fn format_duration_ns(duration_ns: u64) -> String {
 }
 
 struct CollectedSpan {
+    trace_id: String,
     span_id: String,
     parent_span_id: String,
     service_name: String,
@@ -1261,6 +1291,7 @@ fn collect_all_spans(resource_spans: &[ResourceSpans]) -> Vec<CollectedSpan> {
         for ss in &rs.scope_spans {
             for span in &ss.spans {
                 spans.push(CollectedSpan {
+                    trace_id: client::hex_encode(&span.trace_id),
                     span_id: client::hex_encode(&span.span_id),
                     parent_span_id: client::hex_encode(&span.parent_span_id),
                     service_name: service_name.clone(),
@@ -1275,12 +1306,32 @@ fn collect_all_spans(resource_spans: &[ResourceSpans]) -> Vec<CollectedSpan> {
     spans
 }
 
-fn build_trace_summaries(trace_groups: &[store::TraceGroup]) -> Vec<TraceSummary> {
-    let mut summaries: Vec<TraceSummary> = trace_groups
-        .iter()
-        .map(|group| {
-            let trace_id = client::hex_encode(&group.trace_id);
-            let spans = collect_all_spans(&group.resource_spans);
+fn build_trace_summaries(resource_spans_list: &[ResourceSpans]) -> Vec<TraceSummary> {
+    // Group ResourceSpans by trace_id
+    let mut grouped: HashMap<String, Vec<&ResourceSpans>> = HashMap::new();
+    for rs in resource_spans_list {
+        for ss in &rs.scope_spans {
+            for span in &ss.spans {
+                let tid = client::hex_encode(&span.trace_id);
+                grouped.entry(tid).or_default().push(rs);
+            }
+        }
+    }
+    // Deduplicate: a single ResourceSpans may appear multiple times for the same trace_id
+    for group in grouped.values_mut() {
+        group.dedup_by_key(|rs| std::ptr::from_ref(*rs));
+    }
+
+    let mut summaries: Vec<TraceSummary> = grouped
+        .into_iter()
+        .map(|(trace_id, rs_group)| {
+            let all_rs: Vec<_> = rs_group.iter().map(|rs| (*rs).clone()).collect();
+            let spans = collect_all_spans(&all_rs);
+            // Filter spans to only those with this trace_id
+            let spans: Vec<_> = spans
+                .into_iter()
+                .filter(|s| s.trace_id == trace_id)
+                .collect();
             let root = spans.iter().find(|s| {
                 s.parent_span_id.chars().all(|c| c == '0') || s.parent_span_id.is_empty()
             });
@@ -1384,6 +1435,71 @@ fn extract_kv_pairs(
         .collect()
 }
 
+fn sql_row_to_log_row(row: &crate::query::Row) -> LogRow {
+    use crate::query::RowValue;
+
+    fn get_str(row: &crate::query::Row, name: &str) -> String {
+        row.iter()
+            .find(|(n, _)| n == name)
+            .map(|(_, v)| match v {
+                RowValue::String(s) => s.clone(),
+                RowValue::Int(i) => i.to_string(),
+                RowValue::Double(d) => d.to_string(),
+                _ => String::new(),
+            })
+            .unwrap_or_default()
+    }
+    fn get_int(row: &crate::query::Row, name: &str) -> i32 {
+        row.iter()
+            .find(|(n, _)| n == name)
+            .map(|(_, v)| match v {
+                RowValue::Int(i) => *i as i32,
+                _ => 0,
+            })
+            .unwrap_or(0)
+    }
+    fn get_kv_pairs(row: &crate::query::Row, name: &str) -> Vec<(String, String)> {
+        row.iter()
+            .find(|(n, _)| n == name)
+            .map(|(_, v)| match v {
+                RowValue::KeyValueList(kvs) => kvs
+                    .iter()
+                    .map(|kv| {
+                        let val = kv
+                            .value
+                            .as_ref()
+                            .map(client::extract_any_value_string)
+                            .unwrap_or_default();
+                        (kv.key.clone(), val)
+                    })
+                    .collect(),
+                _ => Vec::new(),
+            })
+            .unwrap_or_default()
+    }
+
+    let ts_nanos = row
+        .iter()
+        .find(|(n, _)| n == "timestamp")
+        .map(|(_, v)| match v {
+            RowValue::Int(i) => *i as u64,
+            _ => 0,
+        })
+        .unwrap_or(0);
+
+    LogRow {
+        timestamp: format_timestamp_time_only(ts_nanos),
+        severity: get_str(row, "severity"),
+        service_name: get_str(row, "service_name"),
+        body: get_str(row, "body"),
+        trace_id: get_str(row, "trace_id"),
+        span_id: get_str(row, "span_id"),
+        severity_number: get_int(row, "severity_number"),
+        attributes: get_kv_pairs(row, "attributes"),
+        resource_attributes: get_kv_pairs(row, "resource"),
+    }
+}
+
 fn convert_log_rows(rl: &ResourceLogs) -> Vec<LogRow> {
     let service_name = client::get_service_name(&rl.resource);
     let resource_attributes = rl
@@ -1403,7 +1519,7 @@ fn convert_log_rows(rl: &ResourceLogs) -> Vec<LogRow> {
                         .map(client::extract_any_value_string)
                         .unwrap_or_default();
                     LogRow {
-                        timestamp: format_timestamp_time_only(lr.time_unix_nano),
+                        timestamp: format_timestamp_time_only(crate::store::log_timestamp(lr)),
                         severity: lr.severity_text.clone(),
                         service_name: service_name.clone(),
                         body,
@@ -1601,6 +1717,7 @@ fn build_metric_groups(resource_metrics: &[ResourceMetrics]) -> Vec<MetricGroup>
 
 pub async fn run(
     store: SharedStore,
+    ctx: SessionContext,
     event_rx: broadcast::Receiver<StoreEvent>,
 ) -> anyhow::Result<()> {
     enable_raw_mode()?;
@@ -1616,7 +1733,7 @@ pub async fn run(
         original_hook(panic_info);
     }));
 
-    let app = App::new(store, event_rx);
+    let app = App::new(store, ctx, event_rx);
     let result = app.run(&mut terminal).await;
 
     disable_raw_mode()?;

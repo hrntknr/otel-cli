@@ -14,8 +14,8 @@ Getting started:
   $ otel-cli server --no-tui           Start headless server
 
 Query data:
-  $ otel-cli trace                     List recent traces
-  $ otel-cli log --severity ERROR      Filter logs by severity
+  $ otel-cli traces                    List recent traces
+  $ otel-cli logs --severity ERROR     Filter logs by severity
   $ otel-cli metrics -f                Follow metrics in real-time
 
 Agent skill:
@@ -52,15 +52,18 @@ Examples:
         /// Run without TUI (headless mode)
         #[arg(long)]
         no_tui: bool,
+        /// OTLP endpoint for self-instrumentation (e.g. http://localhost:4317)
+        #[arg(long, env = "OTEL_EXPORTER_OTLP_ENDPOINT")]
+        otlp_endpoint: Option<String>,
     },
     /// Query logs from server
     #[command(after_long_help = "\
 Examples:
-  $ otel-cli log                                 List recent logs
-  $ otel-cli log --severity ERROR                Filter by severity
-  $ otel-cli log --service myapp -f              Follow logs for a service
-  $ otel-cli log --format jsonl --since 10m       JSONL output, last 10 minutes")]
-    Log {
+  $ otel-cli logs                                List recent logs
+  $ otel-cli logs --severity ERROR               Filter by severity
+  $ otel-cli logs --service myapp -f             Follow logs for a service
+  $ otel-cli logs --format jsonl --since 10m      JSONL output, last 10 minutes")]
+    Logs {
         /// Server address
         #[arg(long, default_value = "http://localhost:4319")]
         server: String,
@@ -92,11 +95,11 @@ Examples:
     /// Query traces from server
     #[command(after_long_help = "\
 Examples:
-  $ otel-cli trace                               List recent traces
-  $ otel-cli trace --trace-id abc123             Look up a specific trace
-  $ otel-cli trace --service myapp -f            Follow traces for a service
-  $ otel-cli trace -f --full                     Follow with full trace groups")]
-    Trace {
+  $ otel-cli traces                              List recent traces
+  $ otel-cli traces --trace-id abc123            Look up a specific trace
+  $ otel-cli traces --service myapp -f           Follow traces for a service
+  $ otel-cli traces -f --full                    Follow with full trace groups")]
+    Traces {
         /// Server address
         #[arg(long, default_value = "http://localhost:4319")]
         server: String,
@@ -200,7 +203,7 @@ Examples:
 Examples:
   $ otel-cli sql \"SELECT * FROM traces\"
   $ otel-cli sql \"SELECT * FROM logs WHERE severity >= 'ERROR'\"
-  $ otel-cli sql -f \"SELECT * FROM logs\"          Follow mode
+  $ otel-cli sql -f \"SELECT * FROM logs\"            Follow mode
   $ otel-cli sql \"SELECT * FROM metrics\" --format jsonl")]
     Sql {
         /// Server address
@@ -209,11 +212,23 @@ Examples:
         /// SQL query string
         query: String,
         /// Output format
-        #[arg(long, default_value = "text")]
-        format: OutputFormat,
+        #[arg(long, default_value = "table")]
+        format: SqlOutputFormat,
         /// Follow new results in real-time
         #[arg(short = 'f', long)]
         follow: bool,
+    },
+    /// Show server status
+    Status {
+        /// Server address
+        #[arg(long, default_value = "http://localhost:4319")]
+        server: String,
+    },
+    /// Shutdown the server
+    Shutdown {
+        /// Server address
+        #[arg(long, default_value = "http://localhost:4319")]
+        server: String,
     },
     /// Install agent skill for AI-assisted operation
     #[command(after_long_help = "\
@@ -233,7 +248,18 @@ Examples:
 
 #[derive(clap::ValueEnum, Clone, Debug)]
 pub enum OutputFormat {
+    /// Rich text display (trace/log/metric specific)
     Text,
+    /// Aligned table with header
+    Table,
+    Jsonl,
+    Csv,
+}
+
+#[derive(clap::ValueEnum, Clone, Debug)]
+pub enum SqlOutputFormat {
+    /// Aligned table with header
+    Table,
     Jsonl,
     Csv,
 }
@@ -260,12 +286,14 @@ mod tests {
                 query_addr,
                 max_items,
                 no_tui,
+                otlp_endpoint,
             } => {
                 assert_eq!(grpc_addr, "0.0.0.0:4317");
                 assert_eq!(http_addr, "0.0.0.0:4318");
                 assert_eq!(query_addr, "0.0.0.0:4319");
                 assert_eq!(max_items, 1000);
                 assert!(!no_tui);
+                assert!(otlp_endpoint.is_none());
             }
             _ => panic!("Expected Server command"),
         }
@@ -285,6 +313,8 @@ mod tests {
             "--max-items",
             "5000",
             "--no-tui",
+            "--otlp-endpoint",
+            "http://localhost:4317",
         ]);
         match cli.command {
             Commands::Server {
@@ -293,22 +323,24 @@ mod tests {
                 query_addr,
                 max_items,
                 no_tui,
+                otlp_endpoint,
             } => {
                 assert_eq!(grpc_addr, "127.0.0.1:5317");
                 assert_eq!(http_addr, "127.0.0.1:5318");
                 assert_eq!(query_addr, "127.0.0.1:5319");
                 assert_eq!(max_items, 5000);
                 assert!(no_tui);
+                assert_eq!(otlp_endpoint, Some("http://localhost:4317".to_string()));
             }
             _ => panic!("Expected Server command"),
         }
     }
 
     #[test]
-    fn log_subcommand_parses_with_filters() {
+    fn logs_subcommand_parses_with_filters() {
         let cli = Cli::parse_from([
             "otel-cli",
-            "log",
+            "logs",
             "--service",
             "my-service",
             "--severity",
@@ -321,7 +353,7 @@ mod tests {
             "jsonl",
         ]);
         match cli.command {
-            Commands::Log {
+            Commands::Logs {
                 server,
                 service,
                 severity,
@@ -345,22 +377,22 @@ mod tests {
                 assert_eq!(limit, 50);
                 assert!(matches!(format, OutputFormat::Jsonl));
             }
-            _ => panic!("Expected Log command"),
+            _ => panic!("Expected Logs command"),
         }
     }
 
     #[test]
-    fn trace_subcommand_parses_with_trace_id() {
+    fn traces_subcommand_parses_with_trace_id() {
         let cli = Cli::parse_from([
             "otel-cli",
-            "trace",
+            "traces",
             "--trace-id",
             "abc123def456",
             "--service",
             "frontend",
         ]);
         match cli.command {
-            Commands::Trace {
+            Commands::Traces {
                 server,
                 service,
                 trace_id,
@@ -383,7 +415,7 @@ mod tests {
                 assert!(since.is_none());
                 assert!(until.is_none());
             }
-            _ => panic!("Expected Trace command"),
+            _ => panic!("Expected Traces command"),
         }
     }
 
@@ -427,14 +459,14 @@ mod tests {
     fn attribute_key_value_parsing_works() {
         let cli = Cli::parse_from([
             "otel-cli",
-            "log",
+            "logs",
             "--attribute",
             "env=production",
             "--attribute",
             "region=us-east-1",
         ]);
         match cli.command {
-            Commands::Log { attribute, .. } => {
+            Commands::Logs { attribute, .. } => {
                 assert_eq!(attribute.len(), 2);
                 assert_eq!(attribute[0], ("env".to_string(), "production".to_string()));
                 assert_eq!(
@@ -442,7 +474,7 @@ mod tests {
                     ("region".to_string(), "us-east-1".to_string())
                 );
             }
-            _ => panic!("Expected Log command"),
+            _ => panic!("Expected Logs command"),
         }
     }
 
@@ -479,19 +511,19 @@ mod tests {
 
     #[test]
     fn attribute_parsing_rejects_invalid_format() {
-        let result = Cli::try_parse_from(["otel-cli", "log", "--attribute", "no-equals-sign"]);
+        let result = Cli::try_parse_from(["otel-cli", "logs", "--attribute", "no-equals-sign"]);
         assert!(result.is_err());
     }
 
     #[test]
     fn attribute_value_can_contain_equals() {
-        let cli = Cli::parse_from(["otel-cli", "trace", "--attribute", "query=a=b"]);
+        let cli = Cli::parse_from(["otel-cli", "traces", "--attribute", "query=a=b"]);
         match cli.command {
-            Commands::Trace { attribute, .. } => {
+            Commands::Traces { attribute, .. } => {
                 assert_eq!(attribute.len(), 1);
                 assert_eq!(attribute[0], ("query".to_string(), "a=b".to_string()));
             }
-            _ => panic!("Expected Trace command"),
+            _ => panic!("Expected Traces command"),
         }
     }
 
