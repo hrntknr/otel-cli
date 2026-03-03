@@ -89,13 +89,18 @@ fn resource() -> opentelemetry_sdk::Resource {
         .build()
 }
 
-pub fn register_store_metrics(guard: &TelemetryGuard, store: SharedStore) {
+/// Register observable gauges for store metrics.
+/// Returns gauge handles that must be kept alive for callbacks to fire.
+pub fn register_store_metrics(
+    guard: &TelemetryGuard,
+    store: SharedStore,
+) -> Vec<opentelemetry::metrics::ObservableGauge<u64>> {
     use opentelemetry::metrics::MeterProvider;
 
     let meter = guard.meter_provider.meter("otel-cli");
 
     let store_traces = store.clone();
-    let _trace_gauge = meter
+    let trace_gauge = meter
         .u64_observable_gauge("otel_cli.store.trace_count")
         .with_description("Number of trace groups in the store")
         .with_callback(
@@ -108,7 +113,7 @@ pub fn register_store_metrics(guard: &TelemetryGuard, store: SharedStore) {
         .build();
 
     let store_logs = store.clone();
-    let _log_gauge = meter
+    let log_gauge = meter
         .u64_observable_gauge("otel_cli.store.log_count")
         .with_description("Number of log entries in the store")
         .with_callback(
@@ -121,7 +126,7 @@ pub fn register_store_metrics(guard: &TelemetryGuard, store: SharedStore) {
         .build();
 
     let store_metrics = store;
-    let _metric_gauge = meter
+    let metric_gauge = meter
         .u64_observable_gauge("otel_cli.store.metric_count")
         .with_description("Number of metric entries in the store")
         .with_callback(
@@ -132,6 +137,8 @@ pub fn register_store_metrics(guard: &TelemetryGuard, store: SharedStore) {
             },
         )
         .build();
+
+    vec![trace_gauge, log_gauge, metric_gauge]
 }
 
 pub fn shutdown(guard: Option<TelemetryGuard>) {

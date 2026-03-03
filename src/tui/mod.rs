@@ -19,7 +19,6 @@ use datafusion::prelude::SessionContext;
 
 use crate::client;
 use crate::proto::opentelemetry::proto::{
-    logs::v1::ResourceLogs,
     metrics::v1::{metric, number_data_point, ResourceMetrics},
     trace::v1::ResourceSpans,
 };
@@ -295,7 +294,11 @@ pub struct App {
 }
 
 impl App {
-    fn new(store: SharedStore, ctx: SessionContext, event_rx: broadcast::Receiver<StoreEvent>) -> Self {
+    fn new(
+        store: SharedStore,
+        ctx: SessionContext,
+        event_rx: broadcast::Receiver<StoreEvent>,
+    ) -> Self {
         Self {
             store: store.clone(),
             ctx,
@@ -498,9 +501,9 @@ impl App {
                                     .iter()
                                     .filter(|rs| {
                                         rs.scope_spans.iter().any(|ss| {
-                                            ss.spans
-                                                .iter()
-                                                .any(|s| client::hex_encode(&s.trace_id) == trace_id)
+                                            ss.spans.iter().any(|s| {
+                                                client::hex_encode(&s.trace_id) == trace_id
+                                            })
                                         })
                                     })
                                     .cloned()
@@ -1061,12 +1064,6 @@ impl App {
             None
         };
 
-        let all_logs = if refresh_logs {
-            Some(store.all_logs().iter().cloned().collect::<Vec<_>>())
-        } else {
-            None
-        };
-
         let metrics = if refresh_metrics {
             Some(store.all_metrics().iter().cloned().collect::<Vec<_>>())
         } else {
@@ -1074,13 +1071,15 @@ impl App {
         };
         drop(store);
 
-        // Run DataFusion log filter query (requires await, so done after dropping store lock)
-        let filtered_log_rows = if refresh_logs {
+        // Run DataFusion log query (requires await, so done after dropping store lock)
+        let log_rows = if refresh_logs {
             let log_query = log_filter_to_sql(&self.log_filter);
             let _span = tracing::info_span!("tui.filter_logs").entered();
-            crate::query::sql::execute(&self.ctx, &log_query).await.ok()
+            crate::query::sql::execute(&self.ctx, &log_query)
+                .await
+                .unwrap_or_default()
         } else {
-            None
+            Vec::new()
         };
 
         // Process traces
@@ -1125,14 +1124,11 @@ impl App {
         }
 
         // Process logs
-        if let Some(all_logs) = all_logs {
-            self.update_available_fields(&all_logs);
+        if refresh_logs {
+            self.update_available_fields(&log_rows);
 
-            let mut logs_data: Vec<LogRow> = if let Some(rows) = filtered_log_rows {
-                rows.into_iter().map(|row| sql_row_to_log_row(&row)).collect()
-            } else {
-                all_logs.iter().flat_map(|rl| convert_log_rows(rl)).collect()
-            };
+            let mut logs_data: Vec<LogRow> =
+                log_rows.iter().map(sql_row_to_log_row).collect();
 
             if !self.log_search.is_empty() {
                 let needle = self.log_search.to_ascii_lowercase();
@@ -1171,24 +1167,19 @@ impl App {
         }
     }
 
-    fn update_available_fields(
-        &mut self,
-        logs: &[crate::proto::opentelemetry::proto::logs::v1::ResourceLogs],
-    ) {
+    fn update_available_fields(&mut self, rows: &[crate::proto::otelcli::query::v1::Row]) {
         let mut log_fields = std::collections::BTreeSet::new();
         let mut resource_fields = std::collections::BTreeSet::new();
 
-        for rl in logs {
-            if let Some(ref resource) = rl.resource {
-                for kv in &resource.attributes {
-                    resource_fields.insert(kv.key.clone());
+        for row in rows {
+            if let Some(kvs) = client::get_row_kvlist(row, "attributes") {
+                for kv in kvs {
+                    log_fields.insert(kv.key.clone());
                 }
             }
-            for sl in &rl.scope_logs {
-                for lr in &sl.log_records {
-                    for kv in &lr.attributes {
-                        log_fields.insert(kv.key.clone());
-                    }
+            if let Some(kvs) = client::get_row_kvlist(row, "resource") {
+                for kv in kvs {
+                    resource_fields.insert(kv.key.clone());
                 }
             }
         }
@@ -1202,7 +1193,7 @@ fn log_filter_to_sql(filter: &LogFilter) -> String {
     let mut conditions = Vec::new();
 
     if let Some(ref sev) = filter.severity {
-        let num = crate::query::severity_text_to_number(&sev.value);
+        let num = crate::store::severity_text_to_number(&sev.value).unwrap_or(0);
         let op = match sev.operator {
             FilterOperator::Ge => ">=",
             FilterOperator::Gt => ">",
@@ -1435,55 +1426,42 @@ fn extract_kv_pairs(
         .collect()
 }
 
-fn sql_row_to_log_row(row: &crate::query::Row) -> LogRow {
-    use crate::query::RowValue;
+fn sql_row_to_log_row(row: &crate::proto::otelcli::query::v1::Row) -> LogRow {
+    use crate::proto::opentelemetry::proto::common::v1::any_value;
 
-    fn get_str(row: &crate::query::Row, name: &str) -> String {
-        row.iter()
-            .find(|(n, _)| n == name)
-            .map(|(_, v)| match v {
-                RowValue::String(s) => s.clone(),
-                RowValue::Int(i) => i.to_string(),
-                RowValue::Double(d) => d.to_string(),
-                _ => String::new(),
-            })
-            .unwrap_or_default()
+    fn get_str(row: &crate::proto::otelcli::query::v1::Row, name: &str) -> String {
+        client::get_row_string(row, name).unwrap_or_default()
     }
-    fn get_int(row: &crate::query::Row, name: &str) -> i32 {
-        row.iter()
-            .find(|(n, _)| n == name)
-            .map(|(_, v)| match v {
-                RowValue::Int(i) => *i as i32,
-                _ => 0,
+    fn get_int(row: &crate::proto::otelcli::query::v1::Row, name: &str) -> i32 {
+        row.columns
+            .iter()
+            .find(|c| c.name == name)
+            .and_then(|c| {
+                c.value.as_ref().and_then(|v| match &v.value {
+                    Some(any_value::Value::IntValue(i)) => Some(*i as i32),
+                    _ => None,
+                })
             })
             .unwrap_or(0)
     }
-    fn get_kv_pairs(row: &crate::query::Row, name: &str) -> Vec<(String, String)> {
-        row.iter()
-            .find(|(n, _)| n == name)
-            .map(|(_, v)| match v {
-                RowValue::KeyValueList(kvs) => kvs
-                    .iter()
-                    .map(|kv| {
-                        let val = kv
-                            .value
-                            .as_ref()
-                            .map(client::extract_any_value_string)
-                            .unwrap_or_default();
-                        (kv.key.clone(), val)
-                    })
-                    .collect(),
-                _ => Vec::new(),
-            })
+    fn get_kv_pairs(
+        row: &crate::proto::otelcli::query::v1::Row,
+        name: &str,
+    ) -> Vec<(String, String)> {
+        client::get_row_kvlist(row, name)
+            .map(extract_kv_pairs)
             .unwrap_or_default()
     }
 
     let ts_nanos = row
+        .columns
         .iter()
-        .find(|(n, _)| n == "timestamp")
-        .map(|(_, v)| match v {
-            RowValue::Int(i) => *i as u64,
-            _ => 0,
+        .find(|c| c.name == "timestamp")
+        .and_then(|c| {
+            c.value.as_ref().and_then(|v| match &v.value {
+                Some(any_value::Value::IntValue(i)) => Some(*i as u64),
+                _ => None,
+            })
         })
         .unwrap_or(0);
 
@@ -1498,41 +1476,6 @@ fn sql_row_to_log_row(row: &crate::query::Row) -> LogRow {
         attributes: get_kv_pairs(row, "attributes"),
         resource_attributes: get_kv_pairs(row, "resource"),
     }
-}
-
-fn convert_log_rows(rl: &ResourceLogs) -> Vec<LogRow> {
-    let service_name = client::get_service_name(&rl.resource);
-    let resource_attributes = rl
-        .resource
-        .as_ref()
-        .map(|r| extract_kv_pairs(&r.attributes))
-        .unwrap_or_default();
-    rl.scope_logs
-        .iter()
-        .flat_map(|sl| {
-            sl.log_records
-                .iter()
-                .map(|lr| {
-                    let body = lr
-                        .body
-                        .as_ref()
-                        .map(client::extract_any_value_string)
-                        .unwrap_or_default();
-                    LogRow {
-                        timestamp: format_timestamp_time_only(crate::store::log_timestamp(lr)),
-                        severity: lr.severity_text.clone(),
-                        service_name: service_name.clone(),
-                        body,
-                        trace_id: client::hex_encode(&lr.trace_id),
-                        span_id: client::hex_encode(&lr.span_id),
-                        severity_number: lr.severity_number,
-                        attributes: extract_kv_pairs(&lr.attributes),
-                        resource_attributes: resource_attributes.clone(),
-                    }
-                })
-                .collect::<Vec<_>>()
-        })
-        .collect()
 }
 
 fn format_number_value(value: &Option<number_data_point::Value>) -> String {

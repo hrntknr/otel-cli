@@ -700,12 +700,8 @@ fn draw_status_bar(frame: &mut Frame, area: Rect, app: &App) {
             }
         }
         Tab::Metrics => match app.metric_view {
-            MetricView::List => {
-                format!("Enter:Chart | c:Clear | q:Quit")
-            }
-            MetricView::Chart(_) => {
-                format!("Esc:Back | c:Clear | q:Quit")
-            }
+            MetricView::List => "Enter:Chart | c:Clear | q:Quit".to_string(),
+            MetricView::Chart(_) => "Esc:Back | c:Clear | q:Quit".to_string(),
         },
     };
     let paragraph =

@@ -91,11 +91,10 @@ impl TableProvider for OtelTable {
             } else {
                 vec![vec![batch]]
             };
-            Ok(MemorySourceConfig::try_new_exec(
-                &partitions,
-                self.schema.clone(),
-                projection,
-            )? as Arc<dyn ExecutionPlan>)
+            Ok(
+                MemorySourceConfig::try_new_exec(&partitions, self.schema.clone(), projection)?
+                    as Arc<dyn ExecutionPlan>,
+            )
         })
     }
 }

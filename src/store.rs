@@ -9,7 +9,7 @@ use crate::proto::opentelemetry::proto::{
     trace::v1::ResourceSpans,
 };
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum StoreEvent {
     TracesAdded,
     LogsAdded,
@@ -50,7 +50,7 @@ pub fn log_timestamp(lr: &crate::proto::opentelemetry::proto::logs::v1::LogRecor
 pub fn log_sort_key(rl: &ResourceLogs) -> u64 {
     rl.scope_logs
         .iter()
-        .flat_map(|sl| sl.log_records.iter().map(|lr| log_timestamp(lr)))
+        .flat_map(|sl| sl.log_records.iter().map(log_timestamp))
         .min()
         .unwrap_or(0)
 }
@@ -523,11 +523,7 @@ mod tests {
         )]);
 
         assert_eq!(store.all_traces().len(), 3);
-        let names: Vec<_> = store
-            .all_traces()
-            .iter()
-            .map(get_svc_name)
-            .collect();
+        let names: Vec<_> = store.all_traces().iter().map(get_svc_name).collect();
         assert_eq!(names, vec!["svc-100", "svc-200", "svc-300"]);
     }
 

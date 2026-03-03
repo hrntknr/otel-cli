@@ -51,7 +51,7 @@ async fn handle_traces(
     let response = ExportTraceServiceResponse {
         partial_success: None,
     };
-    Ok(encode_response(&response, is_json)?)
+    encode_response(&response, is_json)
 }
 
 #[instrument(name = "otlp.http.export_logs", skip_all, fields(http.route = "/v1/logs"))]
@@ -79,7 +79,7 @@ async fn handle_logs(
     let response = ExportLogsServiceResponse {
         partial_success: None,
     };
-    Ok(encode_response(&response, is_json)?)
+    encode_response(&response, is_json)
 }
 
 #[instrument(name = "otlp.http.export_metrics", skip_all, fields(http.route = "/v1/metrics"))]
@@ -107,7 +107,7 @@ async fn handle_metrics(
     let response = ExportMetricsServiceResponse {
         partial_success: None,
     };
-    Ok(encode_response(&response, is_json)?)
+    encode_response(&response, is_json)
 }
 
 fn is_json_content_type(headers: &HeaderMap) -> bool {

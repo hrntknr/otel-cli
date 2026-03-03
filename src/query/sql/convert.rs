@@ -1,6 +1,5 @@
 /// Convert old CLI flags to SQL query strings.
-
-use crate::query::severity_text_to_number;
+use crate::store::severity_text_to_number;
 
 pub fn trace_flags_to_sql(
     service: Option<&str>,
@@ -49,7 +48,7 @@ pub fn log_flags_to_sql(
         conditions.push(format!("service_name = '{}'", escape_sql_string(svc)));
     }
     if let Some(sev) = severity {
-        let num = severity_text_to_number(sev);
+        let num = severity_text_to_number(sev).unwrap_or(0);
         conditions.push(format!("severity_number >= {}", num));
     }
     for (key, value) in attributes {

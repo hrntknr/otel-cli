@@ -34,7 +34,7 @@ pub fn run(global: bool, force: bool) -> anyhow::Result<()> {
     let display_path = if global {
         dest.display().to_string()
     } else {
-        format!("./.claude/skills/otel-cli/SKILL.md")
+        "./.claude/skills/otel-cli/SKILL.md".to_string()
     };
 
     let line1 = "otel-cli skill installed successfully!";

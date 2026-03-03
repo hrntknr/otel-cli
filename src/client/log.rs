@@ -1,12 +1,8 @@
 use crate::cli::OutputFormat;
-use crate::proto::otelcli::query::v1::query_service_client::QueryServiceClient;
-use crate::proto::otelcli::query::v1::{Row as ProtoRow, SqlQueryRequest};
+use crate::proto::otelcli::query::v1::Row as ProtoRow;
 use crate::query::sql::convert::log_flags_to_sql;
 
-use super::{
-    get_row_kvlist, get_row_string, get_row_timestamp, parse_time_spec, print_kvlist,
-    print_rows_csv, print_rows_jsonl,
-};
+use super::{get_row_kvlist, get_row_string, get_row_timestamp, parse_time_spec, print_kvlist};
 
 #[allow(clippy::too_many_arguments)]
 pub async fn query_logs(
@@ -29,21 +25,7 @@ pub async fn query_logs(
         start_time_ns,
         end_time_ns,
     );
-
-    let mut client = QueryServiceClient::connect(server.to_string()).await?;
-    let response = client
-        .sql_query(SqlQueryRequest { query: sql })
-        .await?
-        .into_inner();
-
-    match format {
-        OutputFormat::Jsonl => print_rows_jsonl(&response.rows)?,
-        OutputFormat::Csv => print_rows_csv(&response.rows, true),
-        OutputFormat::Table => super::print_rows_table(&response.rows),
-        OutputFormat::Text => print_log_rows_text(&response.rows),
-    }
-
-    Ok(())
+    super::query_and_print(server, &sql, format, print_log_rows_text).await
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -67,27 +49,7 @@ pub async fn follow_logs(
         start_time_ns,
         end_time_ns,
     );
-
-    let mut client = QueryServiceClient::connect(server.to_string()).await?;
-    let mut stream = client
-        .follow_sql(SqlQueryRequest { query: sql })
-        .await?
-        .into_inner();
-
-    let mut csv_header_shown = false;
-    while let Some(msg) = stream.message().await? {
-        match format {
-            OutputFormat::Jsonl => print_rows_jsonl(&msg.rows)?,
-            OutputFormat::Csv => {
-                print_rows_csv(&msg.rows, !csv_header_shown);
-                csv_header_shown = true;
-            }
-            OutputFormat::Table => super::print_rows_table(&msg.rows),
-            OutputFormat::Text => print_log_rows_text(&msg.rows),
-        }
-    }
-
-    Ok(())
+    super::follow_and_print(server, &sql, format, print_log_rows_text).await
 }
 
 pub fn print_log_rows_text(rows: &[ProtoRow]) {

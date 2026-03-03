@@ -8,77 +8,83 @@ use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::prelude::SessionContext;
 use tracing::instrument;
 
-use crate::proto::opentelemetry::proto::common::v1::{any_value, AnyValue, KeyValue};
-use crate::query::{Row, RowValue};
+use crate::proto::opentelemetry::proto::common::v1::{any_value, AnyValue, KeyValue, KeyValueList};
+use crate::proto::otelcli::query::v1::{ColumnValue, Row as ProtoRow};
 
 #[instrument(name = "sql.execute", skip_all, fields(db.statement = sql))]
-pub async fn execute(ctx: &SessionContext, sql: &str) -> Result<Vec<Row>, String> {
+pub async fn execute(ctx: &SessionContext, sql: &str) -> Result<Vec<ProtoRow>, String> {
     let batches = crate::query::datafusion_ctx::execute_sql(ctx, sql).await?;
-    Ok(record_batches_to_rows(&batches))
+    Ok(record_batches_to_proto_rows(&batches))
 }
 
-pub fn record_batches_to_rows(batches: &[RecordBatch]) -> Vec<Row> {
+fn record_batches_to_proto_rows(batches: &[RecordBatch]) -> Vec<ProtoRow> {
     let mut rows = Vec::new();
     for batch in batches {
         let schema = batch.schema();
         for row_idx in 0..batch.num_rows() {
-            let mut row = Vec::with_capacity(schema.fields().len());
-            for (col_idx, field) in schema.fields().iter().enumerate() {
-                let col = batch.column(col_idx);
-                let value = array_value_to_row_value(col.as_ref(), row_idx);
-                row.push((field.name().clone(), value));
-            }
-            rows.push(row);
+            let columns: Vec<ColumnValue> = schema
+                .fields()
+                .iter()
+                .enumerate()
+                .map(|(col_idx, field)| {
+                    let col = batch.column(col_idx);
+                    ColumnValue {
+                        name: field.name().clone(),
+                        value: array_value_to_any_value(col.as_ref(), row_idx),
+                    }
+                })
+                .collect();
+            rows.push(ProtoRow { columns });
         }
     }
     rows
 }
 
-fn array_value_to_row_value(array: &dyn Array, idx: usize) -> RowValue {
+fn array_value_to_any_value(array: &dyn Array, idx: usize) -> Option<AnyValue> {
     if array.is_null(idx) {
-        return RowValue::Null;
+        return None;
     }
-    match array.data_type() {
+    let value = match array.data_type() {
         DataType::Utf8 => {
             let arr = array.as_any().downcast_ref::<StringArray>().unwrap();
-            RowValue::String(arr.value(idx).to_string())
+            any_value::Value::StringValue(arr.value(idx).to_string())
         }
         DataType::Int32 => {
             let arr = array.as_any().downcast_ref::<Int32Array>().unwrap();
-            RowValue::Int(arr.value(idx) as i64)
+            any_value::Value::IntValue(arr.value(idx) as i64)
         }
         DataType::UInt64 => {
             let arr = array.as_any().downcast_ref::<UInt64Array>().unwrap();
-            RowValue::Int(arr.value(idx) as i64)
+            any_value::Value::IntValue(arr.value(idx) as i64)
         }
         DataType::Int64 => {
             let arr = array
                 .as_any()
                 .downcast_ref::<datafusion::arrow::array::Int64Array>()
                 .unwrap();
-            RowValue::Int(arr.value(idx))
+            any_value::Value::IntValue(arr.value(idx))
         }
         DataType::Float64 => {
             let arr = array.as_any().downcast_ref::<Float64Array>().unwrap();
-            RowValue::Double(arr.value(idx))
+            any_value::Value::DoubleValue(arr.value(idx))
         }
         DataType::Map(_, _) => {
             let map_arr = array.as_any().downcast_ref::<MapArray>().unwrap();
-            map_to_kv_list(map_arr, idx)
+            map_to_kvlist_value(map_arr, idx)
         }
         _ => {
             // Fallback: use Arrow display formatting
             use datafusion::arrow::util::display::ArrayFormatter;
-            let formatter = ArrayFormatter::try_new(array, &Default::default());
-            match formatter {
-                Ok(f) => RowValue::String(format!("{}", f.value(idx))),
-                Err(_) => RowValue::Null,
+            match ArrayFormatter::try_new(array, &Default::default()) {
+                Ok(f) => any_value::Value::StringValue(format!("{}", f.value(idx))),
+                Err(_) => return None,
             }
         }
-    }
+    };
+    Some(AnyValue { value: Some(value) })
 }
 
-fn map_to_kv_list(map_arr: &MapArray, idx: usize) -> RowValue {
+fn map_to_kvlist_value(map_arr: &MapArray, idx: usize) -> any_value::Value {
     let offsets = map_arr.offsets();
     let start = offsets[idx] as usize;
     let end = offsets[idx + 1] as usize;
@@ -93,19 +99,18 @@ fn map_to_kv_list(map_arr: &MapArray, idx: usize) -> RowValue {
             None
         } else {
             Some(AnyValue {
-                value: Some(any_value::Value::StringValue(
-                    values.value(i).to_string(),
-                )),
+                value: Some(any_value::Value::StringValue(values.value(i).to_string())),
             })
         };
         kvs.push(KeyValue { key, value: val });
     }
-    RowValue::KeyValueList(kvs)
+    any_value::Value::KvlistValue(KeyValueList { values: kvs })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::client;
     use crate::proto::opentelemetry::proto::{
         common::v1::{any_value, AnyValue, KeyValue},
         logs::v1::{LogRecord, ResourceLogs, ScopeLogs},
@@ -279,8 +284,6 @@ mod tests {
     }
 
     fn setup_ctx(store: &Store) -> SessionContext {
-        // Create a context that reads directly from the store's current state
-        // by converting to RecordBatches and registering as memory tables.
         let ctx = SessionContext::new();
         let traces_batch = crate::query::arrow_convert::traces_to_batch(store);
         let logs_batch = crate::query::arrow_convert::logs_to_batch(store);
@@ -292,6 +295,28 @@ mod tests {
         ctx
     }
 
+    fn get_str(row: &ProtoRow, name: &str) -> String {
+        client::get_row_string(row, name).unwrap_or_default()
+    }
+
+    fn get_int(row: &ProtoRow, name: &str) -> Option<i64> {
+        row.columns.iter().find(|c| c.name == name).and_then(|c| {
+            c.value.as_ref().and_then(|v| match &v.value {
+                Some(any_value::Value::IntValue(i)) => Some(*i),
+                _ => None,
+            })
+        })
+    }
+
+    fn get_double(row: &ProtoRow, name: &str) -> Option<f64> {
+        row.columns.iter().find(|c| c.name == name).and_then(|c| {
+            c.value.as_ref().and_then(|v| match &v.value {
+                Some(any_value::Value::DoubleValue(d)) => Some(*d),
+                _ => None,
+            })
+        })
+    }
+
     #[tokio::test]
     async fn end_to_end_traces_query() {
         let store = setup_store();
@@ -301,10 +326,10 @@ mod tests {
             .unwrap();
         assert_eq!(result.len(), 1);
         let row = &result[0];
-        assert!(row.iter().any(|(name, _)| name == "trace_id"));
-        assert!(row.iter().any(|(name, _)| name == "span_name"));
-        assert!(row.iter().any(|(name, _)| name == "resource"));
-        assert!(row.iter().any(|(name, _)| name == "attributes"));
+        assert!(row.columns.iter().any(|c| c.name == "trace_id"));
+        assert!(row.columns.iter().any(|c| c.name == "span_name"));
+        assert!(row.columns.iter().any(|c| c.name == "resource"));
+        assert!(row.columns.iter().any(|c| c.name == "attributes"));
     }
 
     #[tokio::test]
@@ -334,9 +359,7 @@ mod tests {
     async fn end_to_end_with_limit() {
         let store = setup_store();
         let ctx = setup_ctx(&store);
-        let result = execute(&ctx, "SELECT * FROM traces LIMIT 1")
-            .await
-            .unwrap();
+        let result = execute(&ctx, "SELECT * FROM traces LIMIT 1").await.unwrap();
         assert_eq!(result.len(), 1);
     }
 
@@ -386,9 +409,9 @@ mod tests {
             .unwrap();
         assert_eq!(result.len(), 2);
         for row in &result {
-            assert_eq!(row.len(), 2);
-            assert_eq!(row[0].0, "span_name");
-            assert_eq!(row[1].0, "service_name");
+            assert_eq!(row.columns.len(), 2);
+            assert_eq!(row.columns[0].name, "span_name");
+            assert_eq!(row.columns[1].name, "service_name");
         }
     }
 
@@ -401,9 +424,9 @@ mod tests {
             .unwrap();
         assert_eq!(result.len(), 2);
         for row in &result {
-            assert_eq!(row.len(), 2);
-            assert_eq!(row[0].0, "timestamp");
-            assert_eq!(row[1].0, "severity");
+            assert_eq!(row.columns.len(), 2);
+            assert_eq!(row.columns[0].name, "timestamp");
+            assert_eq!(row.columns[1].name, "severity");
         }
     }
 
@@ -419,13 +442,16 @@ mod tests {
         .unwrap();
         assert_eq!(result.len(), 1);
         let row = &result[0];
-        assert_eq!(row[0].0, "span_name");
-        assert_eq!(row[1].0, "resource");
-        match &row[1].1 {
-            RowValue::KeyValueList(kvs) => {
-                assert!(kvs.iter().any(|kv| kv.key == "service.name"));
-            }
-            _ => panic!("expected KeyValueList for resource"),
+        assert_eq!(row.columns[0].name, "span_name");
+        assert_eq!(row.columns[1].name, "resource");
+        match &row.columns[1].value {
+            Some(v) => match &v.value {
+                Some(any_value::Value::KvlistValue(kvl)) => {
+                    assert!(kvl.values.iter().any(|kv| kv.key == "service.name"));
+                }
+                _ => panic!("expected KvlistValue for resource"),
+            },
+            None => panic!("expected non-null resource"),
         }
     }
 
@@ -441,10 +467,10 @@ mod tests {
         .unwrap();
         assert_eq!(result.len(), 2);
         // backend, frontend (alphabetical order)
-        assert!(matches!(&result[0][0].1, RowValue::String(s) if s == "backend"));
-        assert!(matches!(&result[0][1].1, RowValue::Int(1)));
-        assert!(matches!(&result[1][0].1, RowValue::String(s) if s == "frontend"));
-        assert!(matches!(&result[1][1].1, RowValue::Int(1)));
+        assert_eq!(get_str(&result[0], "service_name"), "backend");
+        assert_eq!(get_int(&result[0], "cnt"), Some(1));
+        assert_eq!(get_str(&result[1], "service_name"), "frontend");
+        assert_eq!(get_int(&result[1], "cnt"), Some(1));
     }
 
     #[tokio::test]
@@ -456,10 +482,8 @@ mod tests {
             .unwrap();
         assert_eq!(result.len(), 1);
         // (1000 + 3000) / 2 = 2000
-        match &result[0][0].1 {
-            RowValue::Double(v) => assert!((v - 2000.0).abs() < 0.01),
-            other => panic!("expected Double, got {:?}", other),
-        }
+        let avg = get_double(&result[0], "avg_dur").expect("expected double");
+        assert!((avg - 2000.0).abs() < 0.01);
     }
 
     #[tokio::test]

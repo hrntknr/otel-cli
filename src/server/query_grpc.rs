@@ -12,7 +12,7 @@ use crate::proto::otelcli::query::v1::{
     FollowTracesResponse, ShutdownRequest, ShutdownResponse, SqlQueryRequest, SqlQueryResponse,
     StatusRequest, StatusResponse,
 };
-use crate::store::{SharedStore, StoreEvent};
+use crate::store::{SharedStore, Store, StoreEvent};
 
 pub struct QueryGrpcService {
     store: SharedStore,
@@ -27,47 +27,6 @@ impl QueryGrpcService {
             ctx,
             shutdown,
         }
-    }
-}
-
-fn rows_to_proto(rows: Vec<crate::query::Row>) -> SqlQueryResponse {
-    use crate::proto::opentelemetry::proto::common::v1::{any_value, AnyValue, KeyValueList};
-
-    fn row_value_to_any_value(rv: &crate::query::RowValue) -> Option<AnyValue> {
-        match rv {
-            crate::query::RowValue::String(s) => Some(AnyValue {
-                value: Some(any_value::Value::StringValue(s.clone())),
-            }),
-            crate::query::RowValue::Int(i) => Some(AnyValue {
-                value: Some(any_value::Value::IntValue(*i)),
-            }),
-            crate::query::RowValue::Double(d) => Some(AnyValue {
-                value: Some(any_value::Value::DoubleValue(*d)),
-            }),
-            crate::query::RowValue::KeyValueList(kvs) => Some(AnyValue {
-                value: Some(any_value::Value::KvlistValue(KeyValueList {
-                    values: kvs.clone(),
-                })),
-            }),
-            crate::query::RowValue::Null => None,
-        }
-    }
-
-    SqlQueryResponse {
-        rows: rows
-            .into_iter()
-            .map(|row| crate::proto::otelcli::query::v1::Row {
-                columns: row
-                    .into_iter()
-                    .map(
-                        |(name, value)| crate::proto::otelcli::query::v1::ColumnValue {
-                            name,
-                            value: row_value_to_any_value(&value),
-                        },
-                    )
-                    .collect(),
-            })
-            .collect(),
     }
 }
 
@@ -97,7 +56,7 @@ impl QueryServiceTrait for QueryGrpcService {
                 Status::invalid_argument(format!("SQL error: {}", e))
             })?;
         tracing::debug!(rows = rows.len(), "SQL query completed");
-        Ok(Response::new(rows_to_proto(rows)))
+        Ok(Response::new(SqlQueryResponse { rows }))
     }
 
     #[instrument(name = "query.follow_sql", skip_all)]
@@ -124,7 +83,7 @@ impl QueryServiceTrait for QueryGrpcService {
         let stream = async_stream::try_stream! {
             // Send initial batch
             if !initial_rows.is_empty() {
-                yield rows_to_proto(initial_rows);
+                yield SqlQueryResponse { rows: initial_rows };
             }
 
             // Wait for new events and re-execute the full query each time
@@ -146,7 +105,7 @@ impl QueryServiceTrait for QueryGrpcService {
                 match crate::query::sql::execute(&ctx, &sql).await {
                     Ok(rows) => {
                         if !rows.is_empty() {
-                            yield rows_to_proto(rows);
+                            yield SqlQueryResponse { rows };
                         }
                     }
                     Err(e) => {
@@ -165,44 +124,18 @@ impl QueryServiceTrait for QueryGrpcService {
         _request: Request<FollowRequest>,
     ) -> Result<Response<Self::FollowTracesStream>, Status> {
         tracing::debug!("starting follow_traces stream");
-        let store = self.store.clone();
-
-        let initial_traces = {
-            let s = store.read().await;
-            s.all_traces().iter().cloned().collect::<Vec<_>>()
-        };
-        let mut last_ts: u64 = initial_traces
-            .iter()
-            .map(crate::store::rs_sort_key)
-            .max()
-            .unwrap_or(0);
-
-        let event_rx = store.read().await.subscribe();
-        let event_stream = BroadcastStream::new(event_rx);
-
-        let stream = async_stream::try_stream! {
-            if !initial_traces.is_empty() {
-                yield FollowTracesResponse { resource_spans: initial_traces };
-            }
-
-            tokio::pin!(event_stream);
-            while let Some(event_result) = event_stream.next().await {
-                if !matches!(event_result, Ok(StoreEvent::TracesAdded)) {
-                    continue;
-                }
-                let s = store.read().await;
-                let traces = s.query_traces_since(last_ts + 1);
-                if traces.is_empty() {
-                    continue;
-                }
-                if let Some(max_ts) = traces.iter().map(crate::store::rs_sort_key).max() {
-                    last_ts = max_ts;
-                }
-                yield FollowTracesResponse { resource_spans: traces };
-            }
-        };
-
-        Ok(Response::new(Box::pin(stream)))
+        let stream = build_follow_stream(
+            self.store.clone(),
+            |s| s.all_traces().iter().cloned().collect(),
+            crate::store::rs_sort_key,
+            StoreEvent::TracesAdded,
+            Store::query_traces_since,
+            |items| FollowTracesResponse {
+                resource_spans: items,
+            },
+        )
+        .await;
+        Ok(Response::new(stream))
     }
 
     #[instrument(name = "query.follow_logs", skip_all)]
@@ -211,44 +144,18 @@ impl QueryServiceTrait for QueryGrpcService {
         _request: Request<FollowRequest>,
     ) -> Result<Response<Self::FollowLogsStream>, Status> {
         tracing::debug!("starting follow_logs stream");
-        let store = self.store.clone();
-
-        let initial_logs = {
-            let s = store.read().await;
-            s.all_logs().iter().cloned().collect::<Vec<_>>()
-        };
-        let mut last_ts: u64 = initial_logs
-            .iter()
-            .map(crate::store::log_sort_key)
-            .max()
-            .unwrap_or(0);
-
-        let event_rx = store.read().await.subscribe();
-        let event_stream = BroadcastStream::new(event_rx);
-
-        let stream = async_stream::try_stream! {
-            if !initial_logs.is_empty() {
-                yield FollowLogsResponse { resource_logs: initial_logs };
-            }
-
-            tokio::pin!(event_stream);
-            while let Some(event_result) = event_stream.next().await {
-                if !matches!(event_result, Ok(StoreEvent::LogsAdded)) {
-                    continue;
-                }
-                let s = store.read().await;
-                let logs = s.query_logs_since(last_ts + 1);
-                if logs.is_empty() {
-                    continue;
-                }
-                if let Some(max_ts) = logs.iter().map(crate::store::log_sort_key).max() {
-                    last_ts = max_ts;
-                }
-                yield FollowLogsResponse { resource_logs: logs };
-            }
-        };
-
-        Ok(Response::new(Box::pin(stream)))
+        let stream = build_follow_stream(
+            self.store.clone(),
+            |s| s.all_logs().iter().cloned().collect(),
+            crate::store::log_sort_key,
+            StoreEvent::LogsAdded,
+            Store::query_logs_since,
+            |items| FollowLogsResponse {
+                resource_logs: items,
+            },
+        )
+        .await;
+        Ok(Response::new(stream))
     }
 
     #[instrument(name = "query.follow_metrics", skip_all)]
@@ -257,44 +164,18 @@ impl QueryServiceTrait for QueryGrpcService {
         _request: Request<FollowRequest>,
     ) -> Result<Response<Self::FollowMetricsStream>, Status> {
         tracing::debug!("starting follow_metrics stream");
-        let store = self.store.clone();
-
-        let initial_metrics = {
-            let s = store.read().await;
-            s.all_metrics().iter().cloned().collect::<Vec<_>>()
-        };
-        let mut last_ts: u64 = initial_metrics
-            .iter()
-            .map(crate::store::metric_sort_key)
-            .max()
-            .unwrap_or(0);
-
-        let event_rx = store.read().await.subscribe();
-        let event_stream = BroadcastStream::new(event_rx);
-
-        let stream = async_stream::try_stream! {
-            if !initial_metrics.is_empty() {
-                yield FollowMetricsResponse { resource_metrics: initial_metrics };
-            }
-
-            tokio::pin!(event_stream);
-            while let Some(event_result) = event_stream.next().await {
-                if !matches!(event_result, Ok(StoreEvent::MetricsAdded)) {
-                    continue;
-                }
-                let s = store.read().await;
-                let metrics = s.query_metrics_since(last_ts + 1);
-                if metrics.is_empty() {
-                    continue;
-                }
-                if let Some(max_ts) = metrics.iter().map(crate::store::metric_sort_key).max() {
-                    last_ts = max_ts;
-                }
-                yield FollowMetricsResponse { resource_metrics: metrics };
-            }
-        };
-
-        Ok(Response::new(Box::pin(stream)))
+        let stream = build_follow_stream(
+            self.store.clone(),
+            |s| s.all_metrics().iter().cloned().collect(),
+            crate::store::metric_sort_key,
+            StoreEvent::MetricsAdded,
+            Store::query_metrics_since,
+            |items| FollowMetricsResponse {
+                resource_metrics: items,
+            },
+        )
+        .await;
+        Ok(Response::new(stream))
     }
 
     #[instrument(name = "query.clear_traces", skip_all)]
@@ -350,4 +231,49 @@ impl QueryServiceTrait for QueryGrpcService {
         self.shutdown.cancel();
         Ok(Response::new(ShutdownResponse {}))
     }
+}
+
+async fn build_follow_stream<T, R>(
+    store: SharedStore,
+    get_initial: fn(&Store) -> Vec<T>,
+    sort_key_fn: fn(&T) -> u64,
+    event_filter: StoreEvent,
+    query_since_fn: fn(&Store, u64) -> Vec<T>,
+    wrap_fn: fn(Vec<T>) -> R,
+) -> Pin<Box<dyn Stream<Item = Result<R, Status>> + Send + 'static>>
+where
+    T: Send + 'static,
+    R: Send + 'static,
+{
+    let initial = {
+        let s = store.read().await;
+        get_initial(&s)
+    };
+    let mut last_ts: u64 = initial.iter().map(sort_key_fn).max().unwrap_or(0);
+    let event_rx = store.read().await.subscribe();
+    let event_stream = BroadcastStream::new(event_rx);
+
+    let stream = async_stream::try_stream! {
+        if !initial.is_empty() {
+            yield wrap_fn(initial);
+        }
+
+        tokio::pin!(event_stream);
+        while let Some(event_result) = event_stream.next().await {
+            if !matches!(&event_result, Ok(e) if *e == event_filter) {
+                continue;
+            }
+            let s = store.read().await;
+            let items = query_since_fn(&s, last_ts + 1);
+            if items.is_empty() {
+                continue;
+            }
+            if let Some(max_ts) = items.iter().map(sort_key_fn).max() {
+                last_ts = max_ts;
+            }
+            yield wrap_fn(items);
+        }
+    };
+
+    Box::pin(stream)
 }

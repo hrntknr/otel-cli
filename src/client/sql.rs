@@ -15,11 +15,7 @@ pub async fn query_sql(server: &str, query: &str, format: &SqlOutputFormat) -> a
     Ok(())
 }
 
-pub async fn follow_sql(
-    server: &str,
-    query: &str,
-    format: &SqlOutputFormat,
-) -> anyhow::Result<()> {
+pub async fn follow_sql(server: &str, query: &str, format: &SqlOutputFormat) -> anyhow::Result<()> {
     let mut client = QueryServiceClient::connect(server.to_string()).await?;
     let mut stream = client
         .follow_sql(SqlQueryRequest {
@@ -36,11 +32,7 @@ pub async fn follow_sql(
     Ok(())
 }
 
-fn print_rows(
-    rows: &[ProtoRow],
-    format: &SqlOutputFormat,
-    csv_header: bool,
-) -> anyhow::Result<()> {
+fn print_rows(rows: &[ProtoRow], format: &SqlOutputFormat, csv_header: bool) -> anyhow::Result<()> {
     if rows.is_empty() {
         return Ok(());
     }

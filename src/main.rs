@@ -18,9 +18,9 @@ async fn main() -> anyhow::Result<()> {
         } => {
             let provider = telemetry::init(otlp_endpoint.as_deref());
             let (store, event_rx) = store::new_shared(max_items);
-            if let Some(ref guard) = provider {
-                telemetry::register_store_metrics(guard, store.clone());
-            }
+            let _gauges = provider
+                .as_ref()
+                .map(|guard| telemetry::register_store_metrics(guard, store.clone()));
             let shutdown = CancellationToken::new();
 
             let grpc_addr: std::net::SocketAddr = grpc_addr.parse()?;
@@ -45,46 +45,36 @@ async fn main() -> anyhow::Result<()> {
             let query_handle = tokio::spawn(server::run_query_server(
                 query_listener,
                 store.clone(),
-                ctx,
+                ctx.clone(),
                 shutdown.clone(),
             ));
 
+            tracing::info!(
+                grpc = %grpc_addr,
+                http = %http_addr,
+                query = %query_addr,
+                "server started"
+            );
+
             if no_tui {
-                tracing::info!(
-                    grpc = %grpc_addr,
-                    http = %http_addr,
-                    query = %query_addr,
-                    "server started"
-                );
                 eprintln!("gRPC server listening on {}", grpc_addr);
                 eprintln!("HTTP server listening on {}", http_addr);
                 eprintln!("Query server listening on {}", query_addr);
                 tokio::signal::ctrl_c().await.ok();
-                tracing::info!("shutting down");
                 eprintln!("\nShutting down...");
-                shutdown.cancel();
-                let _ = grpc_handle.await;
-                let _ = http_handle.await;
-                let _ = query_handle.await;
             } else {
-                tracing::info!(
-                    grpc = %grpc_addr,
-                    http = %http_addr,
-                    query = %query_addr,
-                    "server started"
-                );
                 eprintln!(
                     "Starting OTLP server (gRPC: {}, HTTP: {}, Query: {})",
                     grpc_addr, http_addr, query_addr
                 );
-                let tui_ctx = otel_cli::query::datafusion_ctx::create_context(store.clone());
-                otel_cli::tui::run(store.clone(), tui_ctx, event_rx).await?;
-                tracing::info!("shutting down");
-                shutdown.cancel();
-                let _ = grpc_handle.await;
-                let _ = http_handle.await;
-                let _ = query_handle.await;
+                otel_cli::tui::run(store.clone(), ctx.clone(), event_rx).await?;
             }
+
+            tracing::info!("shutting down");
+            shutdown.cancel();
+            let _ = grpc_handle.await;
+            let _ = http_handle.await;
+            let _ = query_handle.await;
 
             telemetry::shutdown(provider);
 

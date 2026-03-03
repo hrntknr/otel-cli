@@ -11,7 +11,7 @@ use crate::proto::opentelemetry::proto::common::v1::{any_value, AnyValue, KeyVal
 use crate::proto::opentelemetry::proto::resource::v1::Resource;
 
 pub fn hex_encode(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{:02x}", b)).collect()
+    hex::encode(bytes)
 }
 
 pub fn format_timestamp(nanos: u64) -> String {
@@ -89,15 +89,78 @@ pub fn parse_time_spec(s: &str) -> anyhow::Result<u64> {
         .ok_or_else(|| anyhow::anyhow!("timestamp out of range: {}", s))? as u64)
 }
 
-// --- Row display helpers ---
+// --- Query + format helpers ---
 
+use crate::cli::OutputFormat;
+use crate::proto::otelcli::query::v1::query_service_client::QueryServiceClient;
 use crate::proto::otelcli::query::v1::Row as ProtoRow;
+use crate::proto::otelcli::query::v1::SqlQueryRequest;
+
+pub async fn query_and_print(
+    server: &str,
+    sql: &str,
+    format: &OutputFormat,
+    print_text: fn(&[ProtoRow]),
+) -> anyhow::Result<()> {
+    let mut client = QueryServiceClient::connect(server.to_string()).await?;
+    let response = client
+        .sql_query(SqlQueryRequest {
+            query: sql.to_string(),
+        })
+        .await?
+        .into_inner();
+    print_rows(&response.rows, format, print_text)
+}
+
+pub async fn follow_and_print(
+    server: &str,
+    sql: &str,
+    format: &OutputFormat,
+    print_text: fn(&[ProtoRow]),
+) -> anyhow::Result<()> {
+    let mut client = QueryServiceClient::connect(server.to_string()).await?;
+    let mut stream = client
+        .follow_sql(SqlQueryRequest {
+            query: sql.to_string(),
+        })
+        .await?
+        .into_inner();
+    let mut csv_header_shown = false;
+    while let Some(msg) = stream.message().await? {
+        match format {
+            OutputFormat::Jsonl => print_rows_jsonl(&msg.rows)?,
+            OutputFormat::Csv => {
+                print_rows_csv(&msg.rows, !csv_header_shown);
+                csv_header_shown = true;
+            }
+            OutputFormat::Table => print_rows_table(&msg.rows),
+            OutputFormat::Text => print_text(&msg.rows),
+        }
+    }
+    Ok(())
+}
+
+fn print_rows(
+    rows: &[ProtoRow],
+    format: &OutputFormat,
+    print_text: fn(&[ProtoRow]),
+) -> anyhow::Result<()> {
+    match format {
+        OutputFormat::Jsonl => print_rows_jsonl(rows)?,
+        OutputFormat::Csv => print_rows_csv(rows, true),
+        OutputFormat::Table => print_rows_table(rows),
+        OutputFormat::Text => print_text(rows),
+    }
+    Ok(())
+}
+
+// --- Row display helpers ---
 
 pub fn get_row_string(row: &ProtoRow, name: &str) -> Option<String> {
     row.columns.iter().find(|c| c.name == name).and_then(|c| {
         c.value
             .as_ref()
-            .map(|v| extract_any_value_string(v))
+            .map(extract_any_value_string)
             .filter(|s| !s.is_empty())
     })
 }
@@ -105,18 +168,10 @@ pub fn get_row_string(row: &ProtoRow, name: &str) -> Option<String> {
 /// Get a timestamp column and format it as human-readable RFC3339.
 pub fn get_row_timestamp(row: &ProtoRow, name: &str) -> Option<String> {
     row.columns.iter().find(|c| c.name == name).and_then(|c| {
-        c.value.as_ref().and_then(|v| match &v.value {
-            Some(any_value::Value::IntValue(nanos)) => Some(format_timestamp(*nanos as u64)),
-            Some(any_value::Value::StringValue(s)) => {
-                // Try parsing as nanos integer string
-                if let Ok(nanos) = s.parse::<u64>() {
-                    Some(format_timestamp(nanos))
-                } else {
-                    Some(s.clone())
-                }
-            }
-            _ => None,
-        })
+        c.value
+            .as_ref()
+            .map(format_timestamp_value)
+            .filter(|s| !s.is_empty())
     })
 }
 

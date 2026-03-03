@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 
 use datafusion::arrow::datatypes::{DataType, Field, Fields, SchemaRef};
 
@@ -16,7 +16,7 @@ fn map_utf8_utf8() -> DataType {
     )
 }
 
-pub fn traces_schema() -> SchemaRef {
+static TRACES_SCHEMA: LazyLock<SchemaRef> = LazyLock::new(|| {
     Arc::new(datafusion::arrow::datatypes::Schema::new(vec![
         Field::new("trace_id", DataType::Utf8, false),
         Field::new("span_id", DataType::Utf8, false),
@@ -32,9 +32,9 @@ pub fn traces_schema() -> SchemaRef {
         Field::new("attributes", map_utf8_utf8(), false),
         Field::new("resource", map_utf8_utf8(), false),
     ]))
-}
+});
 
-pub fn logs_schema() -> SchemaRef {
+static LOGS_SCHEMA: LazyLock<SchemaRef> = LazyLock::new(|| {
     Arc::new(datafusion::arrow::datatypes::Schema::new(vec![
         Field::new("timestamp", DataType::UInt64, false),
         Field::new("severity", DataType::Utf8, false),
@@ -46,9 +46,9 @@ pub fn logs_schema() -> SchemaRef {
         Field::new("attributes", map_utf8_utf8(), false),
         Field::new("resource", map_utf8_utf8(), false),
     ]))
-}
+});
 
-pub fn metrics_schema() -> SchemaRef {
+static METRICS_SCHEMA: LazyLock<SchemaRef> = LazyLock::new(|| {
     Arc::new(datafusion::arrow::datatypes::Schema::new(vec![
         Field::new("timestamp", DataType::UInt64, false),
         Field::new("metric_name", DataType::Utf8, false),
@@ -60,4 +60,16 @@ pub fn metrics_schema() -> SchemaRef {
         Field::new("attributes", map_utf8_utf8(), false),
         Field::new("resource", map_utf8_utf8(), false),
     ]))
+});
+
+pub fn traces_schema() -> SchemaRef {
+    TRACES_SCHEMA.clone()
+}
+
+pub fn logs_schema() -> SchemaRef {
+    LOGS_SCHEMA.clone()
+}
+
+pub fn metrics_schema() -> SchemaRef {
+    METRICS_SCHEMA.clone()
 }
