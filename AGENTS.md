@@ -120,6 +120,10 @@ otel-cli sql "SELECT t1.span_name as parent, t2.span_name as child, t2.duration_
 otel-cli sql "SELECT span_name, attributes['count'] as batch_size, duration_ns/1e6 as ms FROM traces WHERE service_name = 'otel-cli' AND span_name LIKE 'store.insert%' ORDER BY duration_ns DESC LIMIT 10"
 ```
 
+## Commit Convention
+
+This project uses [Conventional Commits](https://www.conventionalcommits.org/). All commit messages must follow the format `<type>: <description>` (e.g. `feat: add histogram support`, `fix: correct hex encoding`, `docs: update README`). Common types: `feat`, `fix`, `docs`, `chore`, `refactor`, `test`.
+
 ## Testing
 
 - Unit tests are inline in modules (especially `store.rs`, `client/mod.rs`, `query/sql/`).

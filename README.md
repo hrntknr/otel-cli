@@ -68,6 +68,15 @@ otel-cli server
 # Headless mode
 otel-cli server --no-tui
 
+# Custom listen addresses
+otel-cli server --grpc-addr 0.0.0.0:5317 --http-addr 0.0.0.0:5318 --query-addr 0.0.0.0:5319
+
+# Larger store capacity
+otel-cli server --max-traces 5000 --max-spans 200000 --max-logs 5000 --max-metrics 5000
+
+# Self-instrumentation (send own traces to an OTLP endpoint)
+otel-cli server --otlp-endpoint http://localhost:4317
+
 # Attach TUI to a running server
 otel-cli view
 otel-cli view --server http://remote-host:4319
@@ -77,29 +86,32 @@ otel-cli view --server http://remote-host:4319
 
 ```bash
 # List recent traces
-otel-cli trace
+otel-cli traces
 
 # Filter by service name
-otel-cli trace --service myapp
+otel-cli traces --service myapp
 
 # Follow new traces in real-time
-otel-cli trace -f
+otel-cli traces -f
+
+# Follow with full trace groups (not just new spans)
+otel-cli traces -f --full
 
 # Filter by time range
-otel-cli trace --since 5m --format jsonl
+otel-cli traces --since 5m --format jsonl
 ```
 
 ### Query logs
 
 ```bash
 # List recent logs
-otel-cli log
+otel-cli logs
 
 # Filter by severity (shows this level and above)
-otel-cli log --severity ERROR
+otel-cli logs --severity ERROR
 
 # Follow logs in real-time
-otel-cli log -f --service myapp
+otel-cli logs -f --service myapp
 ```
 
 ### Query metrics
@@ -135,16 +147,25 @@ otel-cli sql -f "SELECT * FROM logs"
 
 # CSV output
 otel-cli sql "SELECT * FROM metrics" --format csv
+
+# Show the trace ID of the query request itself (for self-instrumentation debugging)
+otel-cli sql "SELECT * FROM traces LIMIT 10" --show-trace-id
 ```
 
-### Clear data
+### Server management
 
 ```bash
+# Check server status (trace/log/metric counts)
+otel-cli status
+
 # Clear all data
 otel-cli clear --traces --logs --metrics
 
 # Clear only traces
 otel-cli clear --traces
+
+# Shutdown the server
+otel-cli shutdown
 ```
 
 ### Common options
@@ -155,7 +176,18 @@ otel-cli clear --traces
 | `--service <NAME>`        | Filter by service name                                  |
 | `--attribute <KEY=VALUE>` | Filter by attribute (repeatable)                        |
 | `--limit <N>`             | Maximum results (default: 100)                          |
-| `--format <FORMAT>`       | Output format: `text`, `jsonl`, `csv`                   |
+| `--format <FORMAT>`       | Output format: `text`, `table`, `jsonl`, `csv`          |
 | `-f, --follow`            | Follow new data in real-time                            |
 | `--since <SPEC>`          | Time range start (`30s`, `5m`, `1h`, `2d`, or RFC3339)  |
 | `--until <SPEC>`          | Time range end (same format)                            |
+
+## Contributing
+
+This project uses [Conventional Commits](https://www.conventionalcommits.org/) for commit messages. Examples:
+
+```
+feat: add histogram metric support
+fix: correct trace ID hex encoding
+docs: update SQL schema reference
+chore: bump dependencies
+```
