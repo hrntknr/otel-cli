@@ -12,12 +12,15 @@ async fn main() -> anyhow::Result<()> {
             grpc_addr,
             http_addr,
             query_addr,
-            max_items,
+            max_traces,
+            max_spans,
+            max_logs,
+            max_metrics,
             no_tui,
             otlp_endpoint,
         } => {
             let provider = telemetry::init(otlp_endpoint.as_deref());
-            let (store, event_rx) = store::new_shared(max_items);
+            let (store, event_rx) = store::new_shared(max_traces, max_spans, max_logs, max_metrics);
             let _gauges = provider
                 .as_ref()
                 .map(|guard| telemetry::register_store_metrics(guard, store.clone()));
@@ -138,8 +141,14 @@ async fn main() -> anyhow::Result<()> {
             client::clear::clear(&server, traces, logs, metrics).await?;
             Ok(())
         }
-        Commands::View { server, max_items } => {
-            client::view::run_view(&server, max_items).await?;
+        Commands::View {
+            server,
+            max_traces,
+            max_spans,
+            max_logs,
+            max_metrics,
+        } => {
+            client::view::run_view(&server, max_traces, max_spans, max_logs, max_metrics).await?;
             Ok(())
         }
         Commands::Sql {
@@ -147,11 +156,12 @@ async fn main() -> anyhow::Result<()> {
             query,
             format,
             follow,
+            show_trace_id,
         } => {
             if follow {
-                client::sql::follow_sql(&server, &query, &format).await?;
+                client::sql::follow_sql(&server, &query, &format, show_trace_id).await?;
             } else {
-                client::sql::query_sql(&server, &query, &format).await?;
+                client::sql::query_sql(&server, &query, &format, show_trace_id).await?;
             }
             Ok(())
         }

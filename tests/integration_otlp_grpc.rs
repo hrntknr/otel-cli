@@ -46,7 +46,7 @@ fn make_resource(service_name: &str) -> Option<Resource> {
 }
 
 async fn start_servers(grpc_port: u16, query_port: u16) -> (store::SharedStore, CancellationToken) {
-    let (shared_store, _rx) = store::new_shared(1000);
+    let (shared_store, _rx) = store::new_shared(1000, 100000, 1000, 1000);
     let shutdown = CancellationToken::new();
 
     let grpc_addr: std::net::SocketAddr = format!("127.0.0.1:{}", grpc_port).parse().unwrap();

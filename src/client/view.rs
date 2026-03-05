@@ -2,8 +2,14 @@ use crate::proto::otelcli::query::v1::query_service_client::QueryServiceClient;
 use crate::proto::otelcli::query::v1::FollowRequest;
 use crate::store;
 
-pub async fn run_view(server: &str, max_items: usize) -> anyhow::Result<()> {
-    let (store, event_rx) = store::new_shared(max_items);
+pub async fn run_view(
+    server: &str,
+    max_traces: usize,
+    max_spans: usize,
+    max_logs: usize,
+    max_metrics: usize,
+) -> anyhow::Result<()> {
+    let (store, event_rx) = store::new_shared(max_traces, max_spans, max_logs, max_metrics);
 
     let mut client = QueryServiceClient::connect(server.to_string()).await?;
 

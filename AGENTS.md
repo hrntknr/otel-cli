@@ -4,7 +4,7 @@ This file provides guidance to AI coding agents when working with code in this r
 
 ## Project Overview
 
-otel-cli is a Rust CLI tool that acts as an in-memory OpenTelemetry (OTLP) server with querying and TUI visualization. It receives traces, logs, and metrics via standard OTLP gRPC/HTTP, stores them in memory with FIFO eviction, and provides a custom gRPC query API (including a SQL query engine) plus an interactive terminal UI.
+otel-cli is a Rust CLI tool that acts as an in-memory OpenTelemetry (OTLP) server with querying and TUI visualization. It receives traces, logs, and metrics via standard OTLP gRPC/HTTP, stores them in memory with FIFO eviction, and provides a custom gRPC query API (including a DataFusion-based SQL engine) plus an interactive terminal UI.
 
 ## Build & Development Commands
 
@@ -18,69 +18,106 @@ cargo fmt                            # Format
 cargo run -- server                  # Start OTLP server with TUI (gRPC:4317, HTTP:4318, Query:4319)
 cargo run -- server --no-tui         # Start headless server
 cargo run -- view                    # Attach TUI to a running server (default: localhost:4319)
-cargo run -- trace                   # Query traces
-cargo run -- log                     # Query logs
+cargo run -- traces                  # Query traces
+cargo run -- logs                    # Query logs
 cargo run -- metrics                 # Query metrics
 cargo run -- sql "SELECT * FROM traces"  # Run SQL query
-cargo run -- status                   # Check server status (trace/log/metric counts)
-cargo run -- shutdown                 # Remotely shutdown a running server
-cargo run -- skill-install            # Install Claude Code skill for current project
-cargo run -- skill-install --global   # Install skill globally
+cargo run -- status                  # Check server status (trace/log/metric counts)
+cargo run -- shutdown                # Remotely shutdown a running server
+cargo run -- skill-install           # Install Claude Code skill for current project
+cargo run -- skill-install --global  # Install skill globally
 ```
 
 ## Architecture
 
-**Core data flow**: OTLP ingestion (gRPC/HTTP) → `Store` (in-memory, Arc<RwLock>) → Query API (gRPC) / TUI (broadcast channels)
+**Core data flow**: OTLP ingestion (gRPC/HTTP) → `Store` (in-memory, `Arc<RwLock>`) → Query API (gRPC) / TUI (broadcast channels)
 
-- **`src/store.rs`** — Central in-memory store. All signal types (traces, logs, metrics) use `VecDeque` with timestamp-sorted insertion and FIFO eviction. Trace grouping by trace_id is done client-side (TUI/CLI). Filtering happens at query time via the SQL query engine.
+- **`src/store.rs`** — Central in-memory store (`SharedStore = Arc<RwLock<Store>>`). All signal types use `VecDeque` with FIFO eviction. Traces are evicted by `trace_id` when `max_traces` is exceeded.
 - **`src/server/`** — Three listeners: `otlp_grpc.rs` (standard OTLP TraceService/LogsService/MetricsService), `otlp_http.rs` (Axum `/v1/traces`, `/v1/logs`, `/v1/metrics`), `query_grpc.rs` (custom QueryService with streaming follow support and SQL query execution).
-- **`src/client/`** — CLI query commands. Each submodule (trace, log, metrics, sql, clear) builds gRPC requests and formats output (Text/JSONL/CSV). `view.rs` connects to a running server's Follow streams and pipes data into a local Store to drive the TUI. `mod.rs` contains shared utilities: `hex_encode`, `parse_time_spec`, `format_attributes_json`, `format_timestamp`, `print_rows_jsonl`, `print_rows_csv`.
-- **`src/query/`** — SQL query engine. `sql/parser.rs` parses SQL using `sqlparser` crate into an internal `SqlQuery` AST. `sql/eval_traces.rs`, `sql/eval_logs.rs`, `sql/eval_metrics.rs` evaluate WHERE clauses against stored data. `sql/mod.rs` orchestrates execution and projection of results. `sql/convert.rs` converts legacy CLI flags (--service, --attribute, etc.) into SQL strings.
-- **`src/tui/`** — ratatui-based interactive UI with tabs for traces/logs/metrics. Traces have a timeline view, metrics have a chart view. Uses broadcast channel events (`TracesAdded`, `LogsAdded`, etc.) for real-time updates. Dirty tracking for efficient refresh.
-- **`src/install.rs`** — `skill-install` subcommand logic. Embeds `skills/otel-cli/SKILL.md` via `include_str!` and writes it to the local project or `~/.claude/skills/` (with `--global`).
-- **`src/cli.rs`** — clap derive command definitions (Server, View, Trace, Log, Metrics, Sql, Clear, Status, Shutdown, SkillInstall). Output formats: `Text`, `Jsonl`, `Csv`.
+- **`src/client/`** — CLI query commands. Each submodule (trace, log, metrics, sql, clear) builds gRPC requests and formats output (Text/JSONL/CSV). `view.rs` connects to a running server's Follow streams and pipes data into a local Store to drive the TUI. `mod.rs` contains shared utilities.
+- **`src/query/`** — SQL query engine built on DataFusion:
+  - `datafusion_ctx.rs` — Creates a `SessionContext` with three registered tables (`traces`, `logs`, `metrics`). One context is created per server lifetime and reused across queries.
+  - `table_provider.rs` — `OtelTable` implements DataFusion's `TableProvider`. On each `scan()`, it acquires a read lock on the store, converts data to Arrow `RecordBatch` via `arrow_convert`, then releases the lock before query execution.
+  - `arrow_convert.rs` — Converts protobuf store data (ResourceSpans/ResourceLogs/ResourceMetrics) to Arrow RecordBatch format. This is called on every query and is O(total items).
+  - `arrow_schema.rs` — Arrow schema definitions for traces (13 columns), logs (9 columns), and metrics (9 columns).
+  - `sql/mod.rs` — `execute()` runs SQL via DataFusion and converts Arrow RecordBatches to protobuf `Row` responses.
+  - `sql/convert.rs` — Converts CLI flags (`--service`, `--attribute`, etc.) into SQL query strings.
+- **`src/tui/`** — ratatui-based interactive UI with tabs for traces/logs/metrics. Uses broadcast channel events for real-time updates with dirty tracking for efficient refresh.
+- **`src/install.rs`** — `skill-install` subcommand logic. Embeds `skills/otel-cli/SKILL.md` via `include_str!`.
+- **`src/cli.rs`** — clap derive command definitions (Server, View, Traces, Logs, Metrics, Sql, Clear, Status, Shutdown, SkillInstall). Output formats: `Text`, `Table`, `Jsonl`, `Csv`.
 - **`proto/query.proto`** — Custom query/follow/clear/status/shutdown/SQL gRPC API. Standard OTLP protos are in `proto/opentelemetry-proto/` (git submodule).
 - **`build.rs`** — Compiles protobuf files via `tonic_prost_build`.
 
 ## Code Patterns
 
-- Error handling: `anyhow::Result<T>` throughout.
-- Shared state: `Arc<RwLock<Store>>` passed to all server handlers.
-- Event notifications: `broadcast::Sender` for TUI updates.
+- Error handling: `anyhow::Result<T>` for server/CLI, `Result<_, String>` for SQL query internals.
+- Shared state: `Arc<RwLock<Store>>` (`SharedStore`) passed to all server handlers.
+- Event notifications: `broadcast::Sender<StoreEvent>` for TUI and follow-stream updates.
 - Trace IDs: stored as `Vec<u8>`, displayed as hex strings via `hex_encode()`/`hex_decode()`.
 - Timestamps: nanoseconds since epoch internally, formatted as RFC3339 for display.
 - Time specs in queries: relative (`30s`, `5m`, `1h`, `2d`) or RFC3339 absolute.
-- SQL query engine: uses `sqlparser` crate to parse SQL, then evaluates against the in-memory store. Supports WHERE with comparison, LIKE, regex (`~`/`!~`), IN, IS NULL, AND/OR/NOT. Supports column projection, ORDER BY, and LIMIT. Attribute access via bracket syntax: `attributes['key']`, `resource['key']`.
+- SQL: DataFusion `SessionContext` is created once and reused. Supports standard SQL including aggregation, subqueries, and joins. Attribute access via bracket syntax: `attributes['key']`, `resource['key']`.
 - CLI flag queries are internally converted to SQL via `src/query/sql/convert.rs`.
 
 ## Self-Instrumentation
 
-otel-cli can instrument itself using the `--otlp-endpoint` flag (or `OTEL_EXPORTER_OTLP_ENDPOINT` env var). This sends otel-cli's own internal traces to another OTLP collector — useful for profiling and debugging otel-cli itself.
-
-### Two-Server Setup
+otel-cli can instrument itself using `--otlp-endpoint` (or `OTEL_EXPORTER_OTLP_ENDPOINT` env var). Self-reporting (sending traces to itself) works well for most use cases:
 
 ```bash
-# Terminal 1: Collector server (receives otel-cli's own traces)
-cargo run -- server --no-tui --grpc-addr 0.0.0.0:14317 --http-addr 0.0.0.0:14318 --query-addr 0.0.0.0:14319
+# Self-reporting: sends own traces to itself
+cargo run -- server --no-tui --otlp-endpoint http://localhost:4317
 
-# Terminal 2: Instrumented server (the one under test)
-cargo run -- server --no-tui --otlp-endpoint http://localhost:14317
+# Two-server setup (avoids feedback loop when needed):
+# Terminal 1: cargo run -- server --no-tui --grpc-addr 0.0.0.0:14317 --http-addr 0.0.0.0:14318 --query-addr 0.0.0.0:14319
+# Terminal 2: cargo run -- server --no-tui --otlp-endpoint http://localhost:14317
 ```
 
-### Important Notes
+The batch exporter flushes every ~5 seconds. Wait ~6 seconds after activity before querying self-instrumentation data.
 
-- **Batch export delay**: The internal OpenTelemetry SDK uses batch export with a ~5 second schedule. After the instrumented server processes requests, wait ~5-10 seconds before querying the collector for the self-instrumentation traces.
-- **Instrumented spans**: `otlp.grpc.export_traces`, `otlp.grpc.export_logs`, `otlp.grpc.export_metrics`, `otlp.http.export_traces`, `otlp.http.export_logs`, `otlp.http.export_metrics`, `store.insert_traces`, `store.insert_logs`, `store.insert_metrics`, `sql.parse`, `sql.execute`, `query.query_traces`, `query.query_logs`, `query.query_metrics`.
-- **Lock contention analysis**: Spans include `busy_ns` and `idle_ns` attributes that measure RwLock acquisition time (`idle_ns` = time waiting for the lock, `busy_ns` = time holding the lock). High `idle_ns` values indicate lock contention.
+### Key Spans and Attributes
 
-### Analysis Example
+Performance-critical spans (filter by `service_name = 'otel-cli'`):
+
+| Span | Key Attributes | Notes |
+|---|---|---|
+| `sql.execute` | `db.statement` (the SQL text) | Arrow RecordBatch is rebuilt from Store on every call (O(total items)) |
+| `store.insert_traces` | `count` (batch size) | Sorted insertion into VecDeque + eviction can be costly at scale |
+| `store.insert_logs` | `count` | |
+| `store.insert_metrics` | `count` | |
+| `otlp.grpc.export_traces` | | Parent of `store.insert_traces` |
+| `otlp.http.export_traces` | | Parent of `store.insert_traces` |
+| `query.sql_query` | | Parent of `sql.execute` |
+
+Other spans: `otlp.{grpc,http}.export_{logs,metrics}`, `query.follow_*`, `query.clear_*`, `query.status`, `query.shutdown`, `store.clear_*`.
+
+All async spans include `busy_ns` and `idle_ns` attributes from tracing's tokio instrumentation.
+
+### Retrieving Query Trace IDs
+
+Use `--show-trace-id` to get the trace ID of the query request itself. This lets you inspect the server-side execution trace (e.g., `query.sql_query` → `sql.execute`) for that specific request:
 
 ```bash
-# Query self-instrumentation traces from the collector server
-cargo run -- trace --server http://localhost:14319 --format jsonl | jq '.duration_ns' | sort -n
+otel-cli sql "SELECT * FROM traces LIMIT 10" --show-trace-id
+# stderr: trace_id: abcdef1234567890...
 
-# Use SQL for detailed analysis
-cargo run -- sql --server http://localhost:14319 "SELECT span_name, duration_ns, attributes['busy_ns'], attributes['idle_ns'] FROM traces ORDER BY duration_ns DESC LIMIT 20"
+# Then look up the query's own execution trace
+otel-cli sql "SELECT span_name, duration_ns/1e6 as ms FROM traces WHERE trace_id = 'abcdef1234567890...'"
+```
+
+### Useful Analysis Queries
+
+```bash
+# Per-operation average performance
+otel-cli sql "SELECT span_name, COUNT(*) as n, AVG(duration_ns)/1e6 as avg_ms, MAX(duration_ns)/1e6 as max_ms FROM traces WHERE service_name = 'otel-cli' GROUP BY span_name ORDER BY avg_ms DESC"
+
+# SQL query performance with actual statements
+otel-cli sql "SELECT attributes['db.statement'] as stmt, duration_ns/1e6 as ms FROM traces WHERE service_name = 'otel-cli' AND span_name = 'sql.execute' ORDER BY duration_ns DESC LIMIT 10"
+
+# Parent-child span relationships (identify where time is spent)
+otel-cli sql "SELECT t1.span_name as parent, t2.span_name as child, t2.duration_ns/1e6 as child_ms FROM traces t1 JOIN traces t2 ON t1.span_id = t2.parent_span_id WHERE t1.service_name = 'otel-cli' ORDER BY t2.duration_ns DESC LIMIT 20"
+
+# Store insertion throughput
+otel-cli sql "SELECT span_name, attributes['count'] as batch_size, duration_ns/1e6 as ms FROM traces WHERE service_name = 'otel-cli' AND span_name LIKE 'store.insert%' ORDER BY duration_ns DESC LIMIT 10"
 ```
 
 ## Testing

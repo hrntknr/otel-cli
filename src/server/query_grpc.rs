@@ -56,7 +56,13 @@ impl QueryServiceTrait for QueryGrpcService {
                 Status::invalid_argument(format!("SQL error: {}", e))
             })?;
         tracing::debug!(rows = rows.len(), "SQL query completed");
-        Ok(Response::new(SqlQueryResponse { rows }))
+        let mut response = Response::new(SqlQueryResponse { rows });
+        if let Some(trace_id) = current_trace_id() {
+            response
+                .metadata_mut()
+                .insert("x-trace-id", trace_id.parse().unwrap());
+        }
+        Ok(response)
     }
 
     #[instrument(name = "query.follow_sql", skip_all)]
@@ -115,7 +121,13 @@ impl QueryServiceTrait for QueryGrpcService {
             }
         };
 
-        Ok(Response::new(Box::pin(stream)))
+        let mut response: Response<Self::FollowSqlStream> = Response::new(Box::pin(stream));
+        if let Some(trace_id) = current_trace_id() {
+            response
+                .metadata_mut()
+                .insert("x-trace-id", trace_id.parse().unwrap());
+        }
+        Ok(response)
     }
 
     #[instrument(name = "query.follow_traces", skip_all)]
@@ -276,4 +288,17 @@ where
     };
 
     Box::pin(stream)
+}
+
+fn current_trace_id() -> Option<String> {
+    use opentelemetry::trace::TraceContextExt;
+    use tracing_opentelemetry::OpenTelemetrySpanExt;
+
+    let context = tracing::Span::current().context();
+    let span_ref = context.span();
+    let trace_id = span_ref.span_context().trace_id();
+    if trace_id == opentelemetry::trace::TraceId::INVALID {
+        return None;
+    }
+    Some(trace_id.to_string())
 }

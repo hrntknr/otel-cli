@@ -36,7 +36,7 @@ fn make_resource(service_name: &str) -> Option<Resource> {
 }
 
 async fn start_servers(grpc_port: u16, query_port: u16) -> (store::SharedStore, CancellationToken) {
-    let (shared_store, _rx) = store::new_shared(1000);
+    let (shared_store, _rx) = store::new_shared(1000, 100000, 1000, 1000);
     let shutdown = CancellationToken::new();
 
     let grpc_addr: std::net::SocketAddr = format!("127.0.0.1:{}", grpc_port).parse().unwrap();
@@ -443,6 +443,71 @@ async fn test_follow_sql_traces() {
         .unwrap()
         .unwrap();
     assert!(!delta.rows.is_empty());
+}
+
+#[tokio::test]
+async fn test_sql_query_traces_with_trace_id_filter() {
+    let grpc_port = get_available_port();
+    let query_port = get_available_port();
+    let (_store, _shutdown) = start_servers(grpc_port, query_port).await;
+    let addr = format!("http://127.0.0.1:{}", grpc_port);
+    let query_addr = format!("http://127.0.0.1:{}", query_port);
+
+    // Ingest two traces with different trace IDs
+    let mut trace_client = TraceServiceClient::connect(addr.clone()).await.unwrap();
+    trace_client
+        .export(ExportTraceServiceRequest {
+            resource_spans: vec![
+                ResourceSpans {
+                    resource: make_resource("svc"),
+                    scope_spans: vec![ScopeSpans {
+                        scope: None,
+                        spans: vec![Span {
+                            trace_id: vec![0xaa; 16],
+                            span_id: vec![1; 8],
+                            name: "span-aa".into(),
+                            ..Default::default()
+                        }],
+                        schema_url: String::new(),
+                    }],
+                    schema_url: String::new(),
+                },
+                ResourceSpans {
+                    resource: make_resource("svc"),
+                    scope_spans: vec![ScopeSpans {
+                        scope: None,
+                        spans: vec![Span {
+                            trace_id: vec![0xbb; 16],
+                            span_id: vec![2; 8],
+                            name: "span-bb".into(),
+                            ..Default::default()
+                        }],
+                        schema_url: String::new(),
+                    }],
+                    schema_url: String::new(),
+                },
+            ],
+        })
+        .await
+        .unwrap();
+
+    // Query filtering by trace_id
+    let mut query_client = QueryServiceClient::connect(query_addr).await.unwrap();
+    let trace_id_hex = "aa".repeat(16);
+    let response = query_client
+        .sql_query(SqlQueryRequest {
+            query: format!(
+                "SELECT span_name, trace_id FROM traces WHERE trace_id = '{}'",
+                trace_id_hex
+            ),
+        })
+        .await
+        .unwrap();
+
+    let rows = response.into_inner().rows;
+    assert_eq!(rows.len(), 1);
+    assert_eq!(get_row_string(&rows[0], "span_name").unwrap(), "span-aa");
+    assert_eq!(get_row_string(&rows[0], "trace_id").unwrap(), trace_id_hex);
 }
 
 #[tokio::test]

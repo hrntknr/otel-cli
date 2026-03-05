@@ -35,7 +35,7 @@ Examples:
   $ otel-cli server                              Interactive TUI mode
   $ otel-cli server --no-tui                     Headless mode
   $ otel-cli server --grpc-addr 0.0.0.0:5317     Custom gRPC port
-  $ otel-cli server --max-items 5000             Larger store capacity")]
+  $ otel-cli server --max-traces 5000             Larger store capacity")]
     Server {
         /// gRPC listen address (OTLP collector)
         #[arg(long, default_value = "0.0.0.0:4317")]
@@ -46,9 +46,18 @@ Examples:
         /// Query API listen address
         #[arg(long, default_value = "0.0.0.0:4319")]
         query_addr: String,
-        /// Maximum items to keep in store
+        /// Maximum number of distinct traces to keep in store
         #[arg(long, default_value = "1000")]
-        max_items: usize,
+        max_traces: usize,
+        /// Maximum number of ResourceSpans to keep in store
+        #[arg(long, default_value = "100000")]
+        max_spans: usize,
+        /// Maximum number of ResourceLogs to keep in store
+        #[arg(long, default_value = "1000")]
+        max_logs: usize,
+        /// Maximum number of ResourceMetrics to keep in store
+        #[arg(long, default_value = "1000")]
+        max_metrics: usize,
         /// Run without TUI (headless mode)
         #[arg(long)]
         no_tui: bool,
@@ -156,14 +165,23 @@ Examples:
 Examples:
   $ otel-cli view                                Attach to default server
   $ otel-cli view --server http://remote:4319    Attach to remote server
-  $ otel-cli view --max-items 500                Custom local store capacity")]
+  $ otel-cli view --max-traces 500                Custom local store capacity")]
     View {
         /// Query API server address
         #[arg(long, default_value = "http://localhost:4319")]
         server: String,
-        /// Maximum items to keep in local store
+        /// Maximum number of distinct traces to keep in local store
         #[arg(long, default_value = "1000")]
-        max_items: usize,
+        max_traces: usize,
+        /// Maximum number of ResourceSpans to keep in local store
+        #[arg(long, default_value = "100000")]
+        max_spans: usize,
+        /// Maximum number of ResourceLogs to keep in local store
+        #[arg(long, default_value = "1000")]
+        max_logs: usize,
+        /// Maximum number of ResourceMetrics to keep in local store
+        #[arg(long, default_value = "1000")]
+        max_metrics: usize,
     },
     /// Query metrics from server
     #[command(after_long_help = "\
@@ -217,6 +235,9 @@ Examples:
         /// Follow new results in real-time
         #[arg(short = 'f', long)]
         follow: bool,
+        /// Show the trace ID of the query request itself
+        #[arg(long)]
+        show_trace_id: bool,
     },
     /// Show server status
     Status {
@@ -284,14 +305,20 @@ mod tests {
                 grpc_addr,
                 http_addr,
                 query_addr,
-                max_items,
+                max_traces,
+                max_spans,
+                max_logs,
+                max_metrics,
                 no_tui,
                 otlp_endpoint,
             } => {
                 assert_eq!(grpc_addr, "0.0.0.0:4317");
                 assert_eq!(http_addr, "0.0.0.0:4318");
                 assert_eq!(query_addr, "0.0.0.0:4319");
-                assert_eq!(max_items, 1000);
+                assert_eq!(max_traces, 1000);
+                assert_eq!(max_spans, 100000);
+                assert_eq!(max_logs, 1000);
+                assert_eq!(max_metrics, 1000);
                 assert!(!no_tui);
                 assert!(otlp_endpoint.is_none());
             }
@@ -310,7 +337,7 @@ mod tests {
             "127.0.0.1:5318",
             "--query-addr",
             "127.0.0.1:5319",
-            "--max-items",
+            "--max-traces",
             "5000",
             "--no-tui",
             "--otlp-endpoint",
@@ -321,14 +348,15 @@ mod tests {
                 grpc_addr,
                 http_addr,
                 query_addr,
-                max_items,
+                max_traces,
                 no_tui,
                 otlp_endpoint,
+                ..
             } => {
                 assert_eq!(grpc_addr, "127.0.0.1:5317");
                 assert_eq!(http_addr, "127.0.0.1:5318");
                 assert_eq!(query_addr, "127.0.0.1:5319");
-                assert_eq!(max_items, 5000);
+                assert_eq!(max_traces, 5000);
                 assert!(no_tui);
                 assert_eq!(otlp_endpoint, Some("http://localhost:4317".to_string()));
             }
@@ -482,9 +510,18 @@ mod tests {
     fn view_subcommand_parses_with_defaults() {
         let cli = Cli::parse_from(["otel-cli", "view"]);
         match cli.command {
-            Commands::View { server, max_items } => {
+            Commands::View {
+                server,
+                max_traces,
+                max_spans,
+                max_logs,
+                max_metrics,
+            } => {
                 assert_eq!(server, "http://localhost:4319");
-                assert_eq!(max_items, 1000);
+                assert_eq!(max_traces, 1000);
+                assert_eq!(max_spans, 100000);
+                assert_eq!(max_logs, 1000);
+                assert_eq!(max_metrics, 1000);
             }
             _ => panic!("Expected View command"),
         }
@@ -497,13 +534,15 @@ mod tests {
             "view",
             "--server",
             "http://remote:5319",
-            "--max-items",
+            "--max-traces",
             "500",
         ]);
         match cli.command {
-            Commands::View { server, max_items } => {
+            Commands::View {
+                server, max_traces, ..
+            } => {
                 assert_eq!(server, "http://remote:5319");
-                assert_eq!(max_items, 500);
+                assert_eq!(max_traces, 500);
             }
             _ => panic!("Expected View command"),
         }

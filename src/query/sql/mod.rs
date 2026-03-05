@@ -141,7 +141,7 @@ mod tests {
     }
 
     fn setup_store() -> Store {
-        let (mut store, _rx) = Store::new(100);
+        let (mut store, _rx) = Store::new(100, usize::MAX, usize::MAX, usize::MAX);
 
         store.insert_traces(vec![
             ResourceSpans {
@@ -361,6 +361,31 @@ mod tests {
         let ctx = setup_ctx(&store);
         let result = execute(&ctx, "SELECT * FROM traces LIMIT 1").await.unwrap();
         assert_eq!(result.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn end_to_end_trace_aware_limit() {
+        let store = setup_store();
+        let ctx = setup_ctx(&store);
+        // Limit to 1 trace — should return all spans of that trace (1 span per trace in test data)
+        let sql = convert::trace_flags_to_sql(None, None, &[], Some(1), None, None);
+        let result = execute(&ctx, &sql).await.unwrap();
+        assert_eq!(result.len(), 1);
+
+        // Limit to 2 traces — should return both traces
+        let sql = convert::trace_flags_to_sql(None, None, &[], Some(2), None, None);
+        let result = execute(&ctx, &sql).await.unwrap();
+        assert_eq!(result.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn end_to_end_trace_aware_limit_with_filter() {
+        let store = setup_store();
+        let ctx = setup_ctx(&store);
+        let sql = convert::trace_flags_to_sql(Some("frontend"), None, &[], Some(10), None, None);
+        let result = execute(&ctx, &sql).await.unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(get_str(&result[0], "service_name"), "frontend");
     }
 
     #[tokio::test]

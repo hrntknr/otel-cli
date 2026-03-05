@@ -31,7 +31,10 @@ pub fn trace_flags_to_sql(
         conditions.push(format!("start_time <= {}", end));
     }
 
-    build_sql("traces", &conditions, limit)
+    match limit {
+        Some(limit) => build_trace_aware_sql(&conditions, limit),
+        None => build_sql("traces", &conditions, None),
+    }
 }
 
 pub fn log_flags_to_sql(
@@ -93,6 +96,26 @@ pub fn metric_flags_to_sql(
     build_sql("metrics", &conditions, limit)
 }
 
+fn build_trace_aware_sql(conditions: &[String], limit: usize) -> String {
+    let mut subquery = "SELECT trace_id FROM traces".to_string();
+    if !conditions.is_empty() {
+        subquery.push_str(" WHERE ");
+        subquery.push_str(&conditions.join(" AND "));
+    }
+    subquery.push_str(&format!(
+        " GROUP BY trace_id ORDER BY MIN(start_time) DESC LIMIT {}",
+        limit
+    ));
+
+    let mut sql = "SELECT * FROM traces WHERE ".to_string();
+    if !conditions.is_empty() {
+        sql.push_str(&conditions.join(" AND "));
+        sql.push_str(" AND ");
+    }
+    sql.push_str(&format!("trace_id IN ({})", subquery));
+    sql
+}
+
 fn build_sql(table: &str, conditions: &[String], limit: Option<usize>) -> String {
     let mut sql = format!("SELECT * FROM {}", table);
     if !conditions.is_empty() {
@@ -124,7 +147,7 @@ mod tests {
         let sql = trace_flags_to_sql(Some("myapp"), None, &[], Some(100), None, None);
         assert_eq!(
             sql,
-            "SELECT * FROM traces WHERE service_name = 'myapp' LIMIT 100"
+            "SELECT * FROM traces WHERE service_name = 'myapp' AND trace_id IN (SELECT trace_id FROM traces WHERE service_name = 'myapp' GROUP BY trace_id ORDER BY MIN(start_time) DESC LIMIT 100)"
         );
     }
 
@@ -247,7 +270,41 @@ mod tests {
         );
         assert_eq!(
             sql,
-            "SELECT * FROM traces WHERE service_name = 'myapp' AND trace_id = 'abc' AND attributes['env'] = 'prod' AND start_time >= 1000 AND start_time <= 2000 LIMIT 10"
+            "SELECT * FROM traces WHERE service_name = 'myapp' AND trace_id = 'abc' AND attributes['env'] = 'prod' AND start_time >= 1000 AND start_time <= 2000 AND trace_id IN (SELECT trace_id FROM traces WHERE service_name = 'myapp' AND trace_id = 'abc' AND attributes['env'] = 'prod' AND start_time >= 1000 AND start_time <= 2000 GROUP BY trace_id ORDER BY MIN(start_time) DESC LIMIT 10)"
+        );
+    }
+
+    #[test]
+    fn trace_limit_no_conditions() {
+        let sql = trace_flags_to_sql(None, None, &[], Some(50), None, None);
+        assert_eq!(
+            sql,
+            "SELECT * FROM traces WHERE trace_id IN (SELECT trace_id FROM traces GROUP BY trace_id ORDER BY MIN(start_time) DESC LIMIT 50)"
+        );
+    }
+
+    #[test]
+    fn trace_time_range_with_limit() {
+        let sql = trace_flags_to_sql(None, None, &[], Some(10), Some(1000), Some(2000));
+        assert_eq!(
+            sql,
+            "SELECT * FROM traces WHERE start_time >= 1000 AND start_time <= 2000 AND trace_id IN (SELECT trace_id FROM traces WHERE start_time >= 1000 AND start_time <= 2000 GROUP BY trace_id ORDER BY MIN(start_time) DESC LIMIT 10)"
+        );
+    }
+
+    #[test]
+    fn trace_attributes_with_limit() {
+        let sql = trace_flags_to_sql(
+            None,
+            None,
+            &[("env".to_string(), "prod".to_string())],
+            Some(5),
+            None,
+            None,
+        );
+        assert_eq!(
+            sql,
+            "SELECT * FROM traces WHERE attributes['env'] = 'prod' AND trace_id IN (SELECT trace_id FROM traces WHERE attributes['env'] = 'prod' GROUP BY trace_id ORDER BY MIN(start_time) DESC LIMIT 5)"
         );
     }
 

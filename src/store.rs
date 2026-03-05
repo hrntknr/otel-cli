@@ -1,4 +1,4 @@
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use tokio::sync::{broadcast, RwLock};
 use tracing::instrument;
@@ -21,9 +21,13 @@ pub enum StoreEvent {
 
 pub struct Store {
     traces: VecDeque<ResourceSpans>,
+    trace_end_times: HashMap<Vec<u8>, u64>,
     logs: VecDeque<ResourceLogs>,
     metrics: VecDeque<ResourceMetrics>,
-    max_items: usize,
+    max_traces: usize,
+    max_spans: usize,
+    max_logs: usize,
+    max_metrics: usize,
     event_tx: broadcast::Sender<StoreEvent>,
 }
 
@@ -125,13 +129,22 @@ pub fn severity_text_to_number(text: &str) -> Option<i32> {
 }
 
 impl Store {
-    pub fn new(max_items: usize) -> (Self, broadcast::Receiver<StoreEvent>) {
+    pub fn new(
+        max_traces: usize,
+        max_spans: usize,
+        max_logs: usize,
+        max_metrics: usize,
+    ) -> (Self, broadcast::Receiver<StoreEvent>) {
         let (event_tx, event_rx) = broadcast::channel(256);
         let store = Store {
             traces: VecDeque::new(),
+            trace_end_times: HashMap::new(),
             logs: VecDeque::new(),
             metrics: VecDeque::new(),
-            max_items,
+            max_traces,
+            max_spans,
+            max_logs,
+            max_metrics,
             event_tx,
         };
         (store, event_rx)
@@ -156,13 +169,22 @@ impl Store {
     #[instrument(name = "store.insert_traces", skip_all, fields(count = resource_spans.len()))]
     pub fn insert_traces(&mut self, resource_spans: Vec<ResourceSpans>) {
         for rs in resource_spans {
+            for ss in &rs.scope_spans {
+                for span in &ss.spans {
+                    let entry = self
+                        .trace_end_times
+                        .entry(span.trace_id.clone())
+                        .or_insert(0);
+                    *entry = (*entry).max(span.end_time_unix_nano);
+                }
+            }
             let ts = rs_sort_key(&rs);
             let pos = sorted_insert_pos(&self.traces, ts, rs_sort_key);
             self.traces.insert(pos, rs);
-            if self.traces.len() > self.max_items {
-                self.traces.pop_front();
-                tracing::debug!(max_items = self.max_items, "trace evicted");
-            }
+        }
+        while self.trace_end_times.len() > self.max_traces || self.traces.len() > self.max_spans {
+            self.evict_oldest_trace();
+            tracing::debug!(max_traces = self.max_traces, "trace evicted");
         }
         let _ = self.event_tx.send(StoreEvent::TracesAdded);
     }
@@ -173,9 +195,9 @@ impl Store {
             let ts = log_sort_key(&rl);
             let pos = sorted_insert_pos(&self.logs, ts, log_sort_key);
             self.logs.insert(pos, rl);
-            if self.logs.len() > self.max_items {
+            if self.logs.len() > self.max_logs {
                 self.logs.pop_front();
-                tracing::debug!(max_items = self.max_items, "log evicted");
+                tracing::debug!(max_logs = self.max_logs, "log evicted");
             }
         }
         let _ = self.event_tx.send(StoreEvent::LogsAdded);
@@ -187,17 +209,50 @@ impl Store {
             let ts = metric_sort_key(&rm);
             let pos = sorted_insert_pos(&self.metrics, ts, metric_sort_key);
             self.metrics.insert(pos, rm);
-            if self.metrics.len() > self.max_items {
+            if self.metrics.len() > self.max_metrics {
                 self.metrics.pop_front();
-                tracing::debug!(max_items = self.max_items, "metric evicted");
+                tracing::debug!(max_metrics = self.max_metrics, "metric evicted");
             }
         }
         let _ = self.event_tx.send(StoreEvent::MetricsAdded);
     }
 
+    fn evict_oldest_trace(&mut self) {
+        let oldest = self
+            .trace_end_times
+            .iter()
+            .min_by_key(|(_, &t)| t)
+            .map(|(id, _)| id.clone());
+        if let Some(evict_id) = oldest {
+            self.traces.retain(|rs| {
+                !rs.scope_spans
+                    .iter()
+                    .flat_map(|ss| ss.spans.iter())
+                    .any(|s| s.trace_id == evict_id)
+            });
+            self.rebuild_trace_end_times();
+        }
+    }
+
+    fn rebuild_trace_end_times(&mut self) {
+        self.trace_end_times.clear();
+        for rs in &self.traces {
+            for ss in &rs.scope_spans {
+                for span in &ss.spans {
+                    let entry = self
+                        .trace_end_times
+                        .entry(span.trace_id.clone())
+                        .or_insert(0);
+                    *entry = (*entry).max(span.end_time_unix_nano);
+                }
+            }
+        }
+    }
+
     #[instrument(name = "store.clear_traces", skip_all)]
     pub fn clear_traces(&mut self) {
         self.traces.clear();
+        self.trace_end_times.clear();
         let _ = self.event_tx.send(StoreEvent::TracesCleared);
     }
 
@@ -214,7 +269,7 @@ impl Store {
     }
 
     pub fn trace_count(&self) -> usize {
-        self.traces.len()
+        self.trace_end_times.len()
     }
 
     pub fn log_count(&self) -> usize {
@@ -250,8 +305,13 @@ impl Store {
     }
 }
 
-pub fn new_shared(max_items: usize) -> (SharedStore, broadcast::Receiver<StoreEvent>) {
-    let (store, rx) = Store::new(max_items);
+pub fn new_shared(
+    max_traces: usize,
+    max_spans: usize,
+    max_logs: usize,
+    max_metrics: usize,
+) -> (SharedStore, broadcast::Receiver<StoreEvent>) {
+    let (store, rx) = Store::new(max_traces, max_spans, max_logs, max_metrics);
     (Arc::new(RwLock::new(store)), rx)
 }
 
@@ -402,35 +462,38 @@ mod tests {
 
     #[test]
     fn insert_and_all_traces() {
-        let (mut store, _rx) = Store::new(100);
+        let (mut store, _rx) = Store::new(100, usize::MAX, usize::MAX, usize::MAX);
         store.insert_traces(vec![make_resource_spans("svc-a", &[1; 16], &[])]);
         assert_eq!(store.all_traces().len(), 1);
     }
 
     #[test]
     fn insert_and_all_logs() {
-        let (mut store, _rx) = Store::new(100);
+        let (mut store, _rx) = Store::new(100, usize::MAX, usize::MAX, usize::MAX);
         store.insert_logs(vec![make_resource_logs("svc-a", "INFO", &[])]);
         assert_eq!(store.all_logs().len(), 1);
     }
 
     #[test]
     fn insert_and_all_metrics() {
-        let (mut store, _rx) = Store::new(100);
+        let (mut store, _rx) = Store::new(100, usize::MAX, usize::MAX, usize::MAX);
         store.insert_metrics(vec![make_resource_metrics("svc-a", "http.duration")]);
         assert_eq!(store.all_metrics().len(), 1);
     }
 
     #[test]
     fn eviction_traces() {
-        let (mut store, _rx) = Store::new(3);
+        let (mut store, _rx) = Store::new(3, usize::MAX, usize::MAX, usize::MAX);
         for i in 0..5u8 {
-            store.insert_traces(vec![make_resource_spans(
+            store.insert_traces(vec![make_resource_spans_full(
                 &format!("svc-{i}"),
                 &[i; 16],
                 &[],
+                i as u64 * 100,
+                i as u64 * 100 + 50,
             )]);
         }
+        assert_eq!(store.trace_count(), 3);
         assert_eq!(store.all_traces().len(), 3);
         let names: Vec<_> = store
             .all_traces()
@@ -442,12 +505,13 @@ mod tests {
 
     #[test]
     fn eviction_traces_flat() {
-        let (mut store, _rx) = Store::new(2);
+        // Same trace_id across 2 ResourceSpans should count as 1 trace
+        let (mut store, _rx) = Store::new(2, usize::MAX, usize::MAX, usize::MAX);
         store.insert_traces(vec![
             make_resource_spans_full("svc-a", &[1; 16], &[], 100, 200),
             make_resource_spans_full("svc-b", &[1; 16], &[], 200, 300),
         ]);
-        // After inserting 2 items at max_items=2, inserting more evicts oldest
+        // 1 distinct trace_id, so inserting another trace_id keeps both
         store.insert_traces(vec![make_resource_spans_full(
             "svc-c",
             &[2; 16],
@@ -456,18 +520,85 @@ mod tests {
             400,
         )]);
 
-        assert_eq!(store.all_traces().len(), 2);
+        assert_eq!(store.trace_count(), 2);
+        // All 3 ResourceSpans are retained (2 trace_ids <= max_items=2)
+        assert_eq!(store.all_traces().len(), 3);
         let names: Vec<_> = store
             .all_traces()
             .iter()
             .map(|rs| get_svc_name(rs))
             .collect();
+        assert_eq!(names, vec!["svc-a", "svc-b", "svc-c"]);
+    }
+
+    #[test]
+    fn eviction_multi_resource_spans_same_trace() {
+        // Multiple ResourceSpans with the same trace_id are evicted together
+        let (mut store, _rx) = Store::new(1, usize::MAX, usize::MAX, usize::MAX);
+        store.insert_traces(vec![
+            make_resource_spans_full("svc-a", &[1; 16], &[], 100, 200),
+            make_resource_spans_full("svc-b", &[1; 16], &[], 150, 250),
+        ]);
+        // trace_id [1;16] is the only trace, fits in max_items=1
+        assert_eq!(store.trace_count(), 1);
+        assert_eq!(store.all_traces().len(), 2);
+
+        // Insert a new trace_id, evicting the old one
+        store.insert_traces(vec![make_resource_spans_full(
+            "svc-c",
+            &[2; 16],
+            &[],
+            300,
+            400,
+        )]);
+        assert_eq!(store.trace_count(), 1);
+        // Both ResourceSpans of trace_id [1;16] should be gone
+        assert_eq!(store.all_traces().len(), 1);
+        assert_eq!(get_svc_name(&store.all_traces()[0]), "svc-c");
+    }
+
+    #[test]
+    fn eviction_by_end_time() {
+        // The trace with the oldest max end_time is evicted first
+        let (mut store, _rx) = Store::new(2, usize::MAX, usize::MAX, usize::MAX);
+        // trace A: start=100, end=150 (oldest end_time)
+        store.insert_traces(vec![make_resource_spans_full(
+            "svc-a",
+            &[1; 16],
+            &[],
+            100,
+            150,
+        )]);
+        // trace B: start=50, end=500 (newer end_time, despite earlier start)
+        store.insert_traces(vec![make_resource_spans_full(
+            "svc-b",
+            &[2; 16],
+            &[],
+            50,
+            500,
+        )]);
+        // trace C: start=200, end=300
+        store.insert_traces(vec![make_resource_spans_full(
+            "svc-c",
+            &[3; 16],
+            &[],
+            200,
+            300,
+        )]);
+
+        assert_eq!(store.trace_count(), 2);
+        let names: Vec<_> = store
+            .all_traces()
+            .iter()
+            .map(|rs| get_svc_name(rs))
+            .collect();
+        // trace A (end_time=150) should be evicted, not trace B (end_time=500)
         assert_eq!(names, vec!["svc-b", "svc-c"]);
     }
 
     #[test]
     fn eviction_logs() {
-        let (mut store, _rx) = Store::new(3);
+        let (mut store, _rx) = Store::new(usize::MAX, usize::MAX, 3, usize::MAX);
         for i in 0..5 {
             store.insert_logs(vec![make_resource_logs(&format!("svc-{i}"), "INFO", &[])]);
         }
@@ -476,7 +607,7 @@ mod tests {
 
     #[test]
     fn eviction_metrics() {
-        let (mut store, _rx) = Store::new(3);
+        let (mut store, _rx) = Store::new(usize::MAX, usize::MAX, usize::MAX, 3);
         for i in 0..5 {
             store.insert_metrics(vec![make_resource_metrics(&format!("svc-{i}"), "cpu")]);
         }
@@ -485,7 +616,7 @@ mod tests {
 
     #[test]
     fn event_notification() {
-        let (mut store, mut rx) = Store::new(100);
+        let (mut store, mut rx) = Store::new(100, usize::MAX, usize::MAX, usize::MAX);
 
         store.insert_traces(vec![make_resource_spans("svc", &[1; 16], &[])]);
         assert!(matches!(rx.try_recv().unwrap(), StoreEvent::TracesAdded));
@@ -499,7 +630,7 @@ mod tests {
 
     #[test]
     fn insert_traces_sorted_by_timestamp() {
-        let (mut store, _rx) = Store::new(100);
+        let (mut store, _rx) = Store::new(100, usize::MAX, usize::MAX, usize::MAX);
         store.insert_traces(vec![make_resource_spans_full(
             "svc-300",
             &[0; 16],
@@ -529,7 +660,7 @@ mod tests {
 
     #[test]
     fn insert_logs_sorted_by_timestamp() {
-        let (mut store, _rx) = Store::new(100);
+        let (mut store, _rx) = Store::new(100, usize::MAX, usize::MAX, usize::MAX);
         store.insert_logs(vec![make_resource_logs_full("svc-300", "INFO", &[], 300)]);
         store.insert_logs(vec![make_resource_logs_full("svc-100", "INFO", &[], 100)]);
         store.insert_logs(vec![make_resource_logs_full("svc-200", "INFO", &[], 200)]);
@@ -539,7 +670,7 @@ mod tests {
 
     #[test]
     fn query_traces_since() {
-        let (mut store, _rx) = Store::new(100);
+        let (mut store, _rx) = Store::new(100, usize::MAX, usize::MAX, usize::MAX);
         store.insert_traces(vec![
             make_resource_spans_full("svc-a", &[1; 16], &[], 100, 200),
             make_resource_spans_full("svc-b", &[1; 16], &[], 200, 300),
@@ -551,7 +682,7 @@ mod tests {
 
     #[test]
     fn query_logs_since() {
-        let (mut store, _rx) = Store::new(100);
+        let (mut store, _rx) = Store::new(100, usize::MAX, usize::MAX, usize::MAX);
         store.insert_logs(vec![
             make_resource_logs_full("svc", "INFO", &[], 100),
             make_resource_logs_full("svc", "INFO", &[], 200),
@@ -594,7 +725,7 @@ mod tests {
             }
         }
 
-        let (mut store, _rx) = Store::new(100);
+        let (mut store, _rx) = Store::new(100, usize::MAX, usize::MAX, usize::MAX);
         store.insert_metrics(vec![
             make_resource_metrics_with_ts("svc", "cpu", 100),
             make_resource_metrics_with_ts("svc", "cpu", 200),

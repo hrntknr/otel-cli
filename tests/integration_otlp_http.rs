@@ -33,7 +33,7 @@ fn make_resource(service_name: &str) -> Option<Resource> {
 }
 
 async fn start_http_server(port: u16) -> (store::SharedStore, CancellationToken) {
-    let (shared_store, _rx) = store::new_shared(1000);
+    let (shared_store, _rx) = store::new_shared(1000, 100000, 1000, 1000);
     let addr: std::net::SocketAddr = format!("127.0.0.1:{}", port).parse().unwrap();
     let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
     let store_clone = shared_store.clone();

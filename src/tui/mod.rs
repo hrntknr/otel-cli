@@ -508,7 +508,7 @@ impl App {
                                     })
                                     .cloned()
                                     .collect();
-                                self.timeline_spans = build_timeline_spans(&matching);
+                                self.timeline_spans = build_timeline_spans(&matching, &trace_id);
                                 self.timeline_table_state = TableState::default();
                                 if !self.timeline_spans.is_empty() {
                                     self.timeline_table_state.select(Some(0));
@@ -1110,7 +1110,7 @@ impl App {
                     })
                     .cloned()
                     .collect();
-                self.timeline_spans = build_timeline_spans(&matching);
+                self.timeline_spans = build_timeline_spans(&matching, trace_id);
             }
 
             if self.current_tab == tabs::Tab::Traces && self.follow {
@@ -1127,8 +1127,7 @@ impl App {
         if refresh_logs {
             self.update_available_fields(&log_rows);
 
-            let mut logs_data: Vec<LogRow> =
-                log_rows.iter().map(sql_row_to_log_row).collect();
+            let mut logs_data: Vec<LogRow> = log_rows.iter().map(sql_row_to_log_row).collect();
 
             if !self.log_search.is_empty() {
                 let needle = self.log_search.to_ascii_lowercase();
@@ -1351,8 +1350,11 @@ fn build_trace_summaries(resource_spans_list: &[ResourceSpans]) -> Vec<TraceSumm
     summaries
 }
 
-fn build_timeline_spans(resource_spans: &[ResourceSpans]) -> Vec<TimelineSpan> {
-    let all_spans = collect_all_spans(resource_spans);
+fn build_timeline_spans(resource_spans: &[ResourceSpans], trace_id: &str) -> Vec<TimelineSpan> {
+    let all_spans: Vec<_> = collect_all_spans(resource_spans)
+        .into_iter()
+        .filter(|s| s.trace_id == trace_id)
+        .collect();
 
     if all_spans.is_empty() {
         return Vec::new();
